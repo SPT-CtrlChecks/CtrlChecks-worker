@@ -1,0 +1,14 @@
+{
+  "chatbot_basic": {
+    "name": "Basic Chatbot",
+    "description": "A simple chatbot workflow with memory.",
+    "nodes": ["chat_trigger", "memory", "ollama"],
+    "edges": ["chat_trigger->memory", "memory->ollama"]
+  },
+  "webhook_to_slack": {
+    "name": "Webhook to Slack",
+    "description": "Receive webhook data and notify Slack.",
+    "nodes": ["webhook", "slack_message"],
+    "edges": ["webhook->slack_message"]
+  }
+}
