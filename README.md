@@ -1,89 +1,111 @@
-# CtrlChecks FastAPI Backend
+# CtrlChecks Worker - Node.js Backend
 
-This service runs a single FastAPI backend on EC2.
+Unified Node.js/Express backend for CtrlChecks, migrated from Supabase Edge Functions.
 
-## Architecture
-- FastAPI is the only runtime for API endpoints and workflows.
-- Supabase is used only for JWT verification and database access (service role).
-- Long-running AI/workflow generation uses background tasks and `workflow_generation_jobs`.
-- All responses match frontend expectations (paths, payloads, status codes).
+## 🚀 Quick Start
 
-## Environment Variables
-Copy `env.example` to `.env` on the server and fill values:
-
-```
-SUPABASE_URL=
-SUPABASE_SERVICE_ROLE_KEY=
-SUPABASE_JWT_PUBLIC_KEY=
-SUPABASE_JWT_SECRET=
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_TIMEOUT_SECONDS=60
-GEMINI_API_KEY=
-OPENAI_API_KEY=
-ANTHROPIC_API_KEY=
-CHATBOT_API_KEY=
-PUBLIC_BASE_URL=
-WORKER_ID=worker-local
-LOG_LEVEL=INFO
-PROCESS_TIMEOUT_SECONDS=1800
-MAX_RETRIES=3
-RETRY_BASE_SECONDS=1.0
-RETRY_MAX_SECONDS=20.0
-ALLOWED_ORIGINS=*
-```
-
-## Local Run
 ```bash
-cd worker
-python -m venv venv
-venv/bin/pip install -r requirements.txt
-venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001
+# 1. Install dependencies
+npm install
+
+# 2. Configure environment
+cp env.example .env
+# Edit .env with your Supabase credentials
+
+# 3. Start development server
+npm run dev
 ```
 
-## Deployment (systemd)
-Use `deploy/workflow-worker.service` and point `EnvironmentFile` to `/opt/worker/.env`.
+## 📋 Available API Endpoints
 
-## Nginx Reverse Proxy Example
-```nginx
-server {
-  listen 80;
-  server_name api.ctrlchecks.ai;
+- `GET /health` - Health check
+- `POST /api/execute-workflow` - Execute a workflow
+- `POST /api/webhook-trigger/:workflowId` - Trigger workflow via webhook
+- `GET /api/form-trigger/:workflowId/:nodeId` - Get form configuration
+- `POST /api/form-trigger/:workflowId/:nodeId/submit` - Submit form
+- `POST /api/generate-workflow` - Generate workflow from prompt
+- `POST /api/execute-agent` - Execute agent workflow
+- `POST /api/chat-api` - Chat API for workflows
+- `POST /api/chatbot` - Website chatbot
+- `POST /api/execute-multimodal-agent` - Execute multimodal agent
+- `POST /api/build-multimodal-agent` - Build multimodal agent
+- `POST /api/analyze-workflow-requirements` - Analyze workflow requirements
+- `GET /api/admin-templates` - List templates
+- `POST /api/copy-template` - Copy template
 
-  location / {
-    proxy_pass http://127.0.0.1:8001;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-  }
-}
+## 📁 Project Structure
+
+```
+worker/
+├── src/
+│   ├── api/              # API route handlers (12 routes)
+│   ├── core/              # Core utilities (config, database, middleware)
+│   ├── shared/            # Shared utilities (LLM, memory, reasoning, etc.)
+│   ├── services/          # Services (scheduler, workflow-executor)
+│   ├── data/              # Data files (knowledge base)
+│   └── index.ts           # Main server file
+├── package.json           # Dependencies
+├── tsconfig.json          # TypeScript config
+└── env.example            # Environment variables template
 ```
 
-## Health Endpoints
-- `GET /health`
-- `GET /health/ollama`
+## 🔧 Development
 
-## Curl Examples
 ```bash
-curl -X POST https://api.ctrlchecks.ai/generate-workflow \
-  -H "Authorization: Bearer $SUPABASE_JWT" \
-  -H "Content-Type: application/json" \
-  -d '{"prompt":"Build a simple chatbot"}'
+# Development mode (with auto-reload)
+npm run dev
 
-curl https://api.ctrlchecks.ai/workflow-status/job_123
+# Build for production
+npm run build
 
-curl -X POST https://api.ctrlchecks.ai/chat-api \
-  -H "Content-Type: application/json" \
-  -d '{"workflowId":"wf_123","message":"hello"}'
+# Start production server
+npm start
 
-curl -X POST https://api.ctrlchecks.ai/webhook-trigger/wf_123 \
-  -H "Content-Type: application/json" \
-  -d '{"event":"created"}'
+# Type checking
+npm run type-check
 ```
 
-## Migration Checklist
-- Remove Supabase function deploy steps.
-- Update frontend to use the FastAPI endpoints directly (no legacy edge paths).
-- Remove any Deno runtime dependencies from infra.
-- Verify `workflow_generation_jobs` table exists and is writable.
-- Rotate Supabase service role key after cutover.
+## 📚 Documentation
+
+- **QUICK_START.md** - Quick setup guide
+- **LOCAL_DEVELOPMENT_SETUP.md** - Detailed local development guide
+- **MIGRATION_COMPLETE.md** - Migration status from Supabase
+- **CLEANUP_COMPLETE.md** - Cleanup summary
+
+## ✅ Migration Status
+
+**All 12 Supabase Edge Functions migrated:**
+- ✅ execute-workflow
+- ✅ webhook-trigger
+- ✅ form-trigger
+- ✅ generate-workflow
+- ✅ execute-agent
+- ✅ chat-api
+- ✅ chatbot
+- ✅ execute-multimodal-agent
+- ✅ build-multimodal-agent
+- ✅ analyze-workflow-requirements
+- ✅ admin-templates
+- ✅ copy-template
+
+## 🔐 Environment Variables
+
+See `env.example` for required environment variables:
+- `SUPABASE_URL` - Your Supabase project URL
+- `SUPABASE_SERVICE_ROLE_KEY` - Supabase service role key
+- `PORT` - Server port (default: 3001)
+- `CORS_ORIGIN` - CORS origin (default: http://localhost:5173)
+
+## 🧪 Testing
+
+```bash
+# Test health endpoint
+curl http://localhost:3001/health
+
+# Or PowerShell:
+Invoke-RestMethod -Uri http://localhost:3001/health
+```
+
+## 📝 License
+
+ISC

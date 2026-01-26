@@ -1,0 +1,499 @@
+// Core Ollama Orchestrator
+// Unified model management & routing for all AI services
+// Performance optimization & caching
+// Fallback chains & error recovery
+
+import { ollamaManager } from './ollama-manager';
+import { metricsTracker } from './metrics-tracker';
+import { modelManager } from './model-manager';
+import { aiPerformanceMonitor } from './performance-monitor';
+
+export type AIRequestType = 
+  | 'chat-generation'
+  | 'intent-analysis'
+  | 'text-analysis'
+  | 'entity-extraction'
+  | 'summarization'
+  | 'translation'
+  | 'code-generation'
+  | 'code-assistance'
+  | 'image-understanding'
+  | 'image-comparison'
+  | 'audio-transcription'
+  | 'workflow-generation'
+  | 'workflow-analysis'
+  | 'node-suggestion'
+  | 'error-analysis'
+  | 'reasoning';
+
+interface ModelRegistry {
+  capabilities: string[];
+  size: string;
+  loaded: boolean;
+  performance: number; // Average response time in ms
+  usageCount: number;
+  successRate: number;
+}
+
+interface SpecializedModels {
+  [key: string]: string[];
+}
+
+export class OllamaOrchestrator {
+  private modelRegistry: Map<string, ModelRegistry> = new Map();
+  private specializedModels: SpecializedModels = {
+    // Website Chatbot
+    'chichu-chat': ['qwen2.5:3b', 'qwen2.5:7b', 'mistral:7b'],
+    
+    // Multimodal Processing
+    'text-analysis': ['qwen2.5:3b', 'mistral:7b'],
+    'image-understanding': ['llava:latest'],
+    // Note: Whisper is not a standard Ollama model - audio processing uses alternative models
+    'audio-processing': [], // Audio processing handled separately if needed
+    
+    // Code/Editing
+    'code-generation': ['codellama:7b'],
+    'text-editing': ['qwen2.5:3b', 'gemma2:9b'],
+    
+    // Workflow Generation
+    'workflow-creation': ['qwen2.5:3b', 'qwen2.5:7b'],
+    'reasoning': ['qwen2.5:7b', 'mistral:7b']
+  };
+  
+  private cache: Map<string, { result: any; timestamp: number }> = new Map();
+  private cacheTTL = 5 * 60 * 1000; // 5 minutes
+
+  constructor() {
+    this.initializeModelRegistry();
+  }
+
+  private initializeModelRegistry() {
+    // Initialize registry with known models
+    const models = [
+      { name: 'qwen2.5:3b', capabilities: ['text', 'chat', 'fast'], size: '1.9GB' },
+      { name: 'qwen2.5:7b', capabilities: ['text', 'chat', 'reasoning'], size: '4.7GB' },
+      { name: 'codellama:7b', capabilities: ['code'], size: '3.8GB' },
+      { name: 'llava:latest', capabilities: ['image', 'multimodal'], size: '4.7GB' },
+      { name: 'mistral:7b', capabilities: ['text', 'chat'], size: '4.4GB' },
+    ];
+
+    models.forEach(model => {
+      this.modelRegistry.set(model.name, {
+        capabilities: model.capabilities,
+        size: model.size,
+        loaded: false,
+        performance: 0,
+        usageCount: 0,
+        successRate: 100,
+      });
+    });
+  }
+
+  async initialize(): Promise<void> {
+    console.log('🤖 Initializing Ollama AI Orchestrator...');
+    
+    try {
+      // Initialize underlying Ollama manager
+      await ollamaManager.initialize();
+      
+      // Load all required models
+      await this.loadSpecializedModels();
+      
+      // Warm up models with test prompts
+      await this.warmupModels();
+      
+      // Start performance monitoring
+      this.startPerformanceMonitoring();
+      
+      console.log('✅ Ollama AI Orchestrator ready');
+    } catch (error) {
+      console.error('❌ Failed to initialize Ollama Orchestrator:', error);
+      throw error;
+    }
+  }
+
+  private async loadSpecializedModels(): Promise<void> {
+    const allModels = new Set<string>();
+    
+    Object.values(this.specializedModels).forEach(models => {
+      models.forEach(model => allModels.add(model));
+    });
+    
+    const modelArray = Array.from(allModels);
+    console.log(`📦 Loading specialized models: ${modelArray.join(', ')}`);
+    
+    await ollamaManager.ensureModelsLoaded(modelArray);
+    
+    // Update registry
+    modelArray.forEach(model => {
+      const registry = this.modelRegistry.get(model);
+      if (registry) {
+        registry.loaded = true;
+      }
+    });
+  }
+
+  private async warmupModels(): Promise<void> {
+    console.log('🔥 Warming up models...');
+    
+    const warmupPrompts = [
+      { model: 'qwen2.5:3b', prompt: 'Hello' },
+      { model: 'codellama:7b', prompt: '// Hello' },
+    ];
+
+    for (const { model, prompt } of warmupPrompts) {
+      try {
+        await ollamaManager.generate(prompt, { model, max_tokens: 10 });
+        console.log(`✅ Warmed up ${model}`);
+      } catch (error) {
+        console.warn(`⚠️  Failed to warm up ${model}:`, error);
+      }
+    }
+  }
+
+  private startPerformanceMonitoring(): void {
+    // Monitor performance every 5 minutes
+    setInterval(() => {
+      this.logPerformanceMetrics();
+    }, 5 * 60 * 1000);
+  }
+
+  private logPerformanceMetrics(): void {
+    console.log('\n📊 AI Performance Metrics:');
+    this.modelRegistry.forEach((stats, model) => {
+      if (stats.usageCount > 0) {
+        console.log(`  ${model}: ${stats.usageCount} requests, ${stats.performance.toFixed(0)}ms avg, ${stats.successRate.toFixed(1)}% success`);
+      }
+    });
+  }
+
+  async processRequest(
+    type: AIRequestType,
+    input: any,
+    options?: {
+      cache?: boolean;
+      temperature?: number;
+      max_tokens?: number;
+      stream?: boolean;
+    }
+  ): Promise<any> {
+    const startTime = Date.now();
+    // Select optimal model for the task (declare outside try/catch to avoid shadowing)
+    let model = this.selectOptimalModel(type, input);
+    
+    try {
+      // Check cache
+      if (options?.cache !== false) {
+        const cacheKey = this.getCacheKey(type, input);
+        const cached = this.cache.get(cacheKey);
+        if (cached && Date.now() - cached.timestamp < this.cacheTTL) {
+          metricsTracker.trackCache(true);
+          return cached.result;
+        }
+        metricsTracker.trackCache(false);
+      }
+      
+      // Apply preprocessing based on type
+      const processedInput = this.preprocessInput(type, input);
+      
+      // Execute with retry logic
+      const result = await this.executeWithRetry(model, type, processedInput, options);
+      
+      // Apply postprocessing
+      const processedResult = this.postprocessResult(type, result);
+      
+      // Update model performance metrics
+      const duration = Date.now() - startTime;
+      this.updateModelPerformance(model, duration, true);
+      
+      // Cache result
+      if (options?.cache !== false) {
+        const cacheKey = this.getCacheKey(type, input);
+        this.cache.set(cacheKey, {
+          result: processedResult,
+          timestamp: Date.now(),
+        });
+      }
+      
+      // Track metrics
+      metricsTracker.trackRequest(model, true, duration);
+      aiPerformanceMonitor.trackRequest(type, model, startTime, true);
+      
+      return processedResult;
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      // Track failure metrics
+      metricsTracker.trackRequest(model, false, duration);
+      aiPerformanceMonitor.trackRequest(type, model, startTime, false);
+      
+      // Try fallback model
+      try {
+        const fallbackModel = this.getFallbackModel(type);
+        if (fallbackModel) {
+          console.log(`🔄 Trying fallback model: ${fallbackModel}`);
+          model = fallbackModel; // Update model for fallback
+          const result = await this.executeWithRetry(fallbackModel, type, input, options);
+          this.updateModelPerformance(fallbackModel, Date.now() - startTime, true);
+          return this.postprocessResult(type, result);
+        }
+      } catch (fallbackError) {
+        console.error('❌ Fallback also failed:', fallbackError);
+      }
+      
+      this.updateModelPerformance(model, duration, false);
+      throw error;
+    }
+  }
+
+  private selectOptimalModel(type: AIRequestType, input: any): string {
+    // Check for specialized models
+    if (type === 'image-understanding' || type === 'image-comparison') {
+      return 'llava:latest';
+    }
+    
+    if (type === 'code-generation' || type === 'code-assistance') {
+      return 'codellama:7b';
+    }
+    
+    if (type === 'audio-transcription') {
+      // Whisper is not a standard Ollama model - use text models as fallback
+      // Audio transcription should be handled by specialized services
+      return 'qwen2.5:3b'; // Fallback to text model
+    }
+    
+    // Get specialized models for this type
+    const specialized = this.specializedModels[type] || this.specializedModels['chichu-chat'];
+    
+    if (specialized && specialized.length > 0) {
+      // Select based on performance
+      let bestModel = specialized[0];
+      let bestPerformance = Infinity;
+      
+      for (const model of specialized) {
+        const registry = this.modelRegistry.get(model);
+        if (registry && registry.loaded) {
+          if (registry.performance < bestPerformance) {
+            bestPerformance = registry.performance;
+            bestModel = model;
+          }
+        }
+      }
+      
+      return bestModel;
+    }
+    
+    // Default to fastest general model
+    return 'qwen2.5:3b';
+  }
+
+  private preprocessInput(type: AIRequestType, input: any): any {
+    // Apply type-specific preprocessing
+    switch (type) {
+      case 'intent-analysis':
+        return {
+          message: input.message || input,
+          availableIntents: input.availableIntents || ['question', 'command', 'feedback', 'help'],
+        };
+      
+      case 'summarization':
+        return {
+          text: input.text || input,
+          length: input.length || 'medium',
+        };
+      
+      default:
+        return input;
+    }
+  }
+
+  private async executeWithRetry(
+    model: string,
+    type: AIRequestType,
+    input: any,
+    options?: any,
+    maxRetries = 3
+  ): Promise<any> {
+    let lastError: Error | null = null;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        if (type === 'image-understanding' || type === 'image-comparison') {
+          return await ollamaManager.multimodal(
+            input.image || input.images?.[0],
+            input.prompt || input.question || 'Describe this image',
+            { model, temperature: options?.temperature }
+          );
+        }
+        
+        if (type === 'code-generation' || type === 'code-assistance') {
+          const prompt = this.buildCodePrompt(type, input);
+          return await ollamaManager.generate(prompt, {
+            model,
+            system: input.system,
+            temperature: options?.temperature ?? 0.2,
+            max_tokens: options?.max_tokens,
+            stream: options?.stream,
+          });
+        }
+        
+        // Default: text generation
+        const prompt = this.buildPrompt(type, input);
+        return await ollamaManager.generate(prompt, {
+          model,
+          system: input.system,
+          temperature: options?.temperature ?? 0.7,
+          max_tokens: options?.max_tokens,
+          stream: options?.stream,
+        });
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (attempt < maxRetries) {
+          console.warn(`⚠️  Attempt ${attempt} failed, retrying...`);
+          await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+        }
+      }
+    }
+    
+    throw lastError || new Error('Execution failed after retries');
+  }
+
+  private buildPrompt(type: AIRequestType, input: any): string {
+    switch (type) {
+      case 'intent-analysis':
+        return `Analyze the following message and determine its intent. Available intents: ${input.availableIntents?.join(', ')}. 
+Message: "${input.message}"
+Respond with JSON: { "intent": "...", "confidence": 0.0-1.0, "entities": [], "requiresAction": false }`;
+      
+      case 'summarization':
+        const length = input.length || 'medium';
+        return `Summarize the following text in a ${length} format:
+${input.text}`;
+      
+      case 'workflow-generation':
+        return `Generate a workflow based on this requirement: ${input.prompt || input}`;
+      
+      case 'error-analysis':
+        return `Analyze this error and suggest a fix:
+Error: ${input.error}
+Context: ${JSON.stringify(input.context || {})}`;
+      
+      default:
+        return typeof input === 'string' ? input : JSON.stringify(input);
+    }
+  }
+
+  private buildCodePrompt(type: AIRequestType, input: any): string {
+    if (type === 'code-assistance') {
+      return `Provide code assistance for this context:
+${JSON.stringify(input, null, 2)}
+
+Provide suggestions, corrections, and optimizations.`;
+    }
+    
+    return `Generate code based on: ${input.prompt || JSON.stringify(input)}`;
+  }
+
+  private postprocessResult(type: AIRequestType, result: any): any {
+    // Apply type-specific postprocessing
+    if (type === 'intent-analysis') {
+      try {
+        const parsed = typeof result.content === 'string' 
+          ? JSON.parse(result.content) 
+          : result.content;
+        return parsed;
+      } catch {
+        return {
+          intent: 'unknown',
+          confidence: 0.5,
+          entities: [],
+          requiresAction: false,
+        };
+      }
+    }
+    
+    return result.content || result;
+  }
+
+  private updateModelPerformance(model: string, duration: number, success: boolean): void {
+    const registry = this.modelRegistry.get(model);
+    if (registry) {
+      registry.usageCount++;
+      
+      if (success) {
+        // Update average performance
+        registry.performance = 
+          (registry.performance * (registry.usageCount - 1) + duration) / registry.usageCount;
+        
+        // Update success rate
+        const successCount = Math.floor(registry.usageCount * (registry.successRate / 100));
+        registry.successRate = ((successCount + 1) / registry.usageCount) * 100;
+      } else {
+        const successCount = Math.floor(registry.usageCount * (registry.successRate / 100));
+        registry.successRate = (successCount / registry.usageCount) * 100;
+      }
+    }
+  }
+
+  private getFallbackModel(type: AIRequestType): string | null {
+    // Return a fallback model for the type
+    if (type === 'code-generation' || type === 'code-assistance') {
+      return 'qwen2.5:3b'; // Fallback to general model
+    }
+    
+    return 'qwen2.5:3b'; // Default fallback
+  }
+
+  private getCacheKey(type: AIRequestType, input: any): string {
+    return `${type}:${JSON.stringify(input)}`;
+  }
+
+  async listModels(): Promise<any[]> {
+    return await ollamaManager.getAvailableModels();
+  }
+
+  async loadModel(model: string): Promise<void> {
+    await ollamaManager.ensureModelsLoaded([model]);
+    const registry = this.modelRegistry.get(model);
+    if (registry) {
+      registry.loaded = true;
+    }
+  }
+
+  getOptimizationSuggestions(): any[] {
+    const suggestions: any[] = [];
+    
+    this.modelRegistry.forEach((stats, model) => {
+      if (stats.performance > 5000) {
+        suggestions.push({
+          type: 'performance',
+          model,
+          issue: `Slow response time: ${stats.performance.toFixed(0)}ms`,
+          suggestion: 'Consider using lighter model or implementing caching',
+        });
+      }
+      
+      if (stats.usageCount > 1000) {
+        suggestions.push({
+          type: 'popularity',
+          model,
+          issue: `High usage: ${stats.usageCount} requests`,
+          suggestion: 'Keep this model pre-loaded for better performance',
+        });
+      }
+      
+      if (stats.successRate < 95) {
+        suggestions.push({
+          type: 'reliability',
+          model,
+          issue: `Low success rate: ${stats.successRate.toFixed(1)}%`,
+          suggestion: 'Investigate error patterns and improve error handling',
+        });
+      }
+    });
+    
+    return suggestions;
+  }
+}
+
+// Export singleton instance
+export const ollamaOrchestrator = new OllamaOrchestrator();

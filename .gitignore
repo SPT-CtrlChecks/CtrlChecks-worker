@@ -1,39 +1,8 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-venv/
-env/
-ENV/
-.venv
-
-# Environment
+node_modules/
+dist/
 .env
-.env.local
-.env.*.local
-
-# IDE
-.vscode/
-.idea/
+*.log
+.DS_Store
 *.swp
 *.swo
-
-# Logs
-*.log
-logs/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Distribution
-dist/
-build/
-*.egg-info/
+*~
