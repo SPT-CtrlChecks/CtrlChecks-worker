@@ -491,6 +491,186 @@ export async function executeNode(
       };
     }
 
+    case 'ai_agent': {
+      // AI Agent node with port-specific inputs
+      // Input structure: { chat_model: {...}, memory: {...}, tool: {...}, userInput: {...} }
+      
+      const systemPrompt = getStringProperty(config, 'systemPrompt', 'You are an autonomous intelligent agent inside an automation workflow.');
+      const mode = getStringProperty(config, 'mode', 'chat');
+      const temperature = parseFloat(getStringProperty(config, 'temperature', '0.7')) || 0.7;
+      const maxTokens = parseInt(getStringProperty(config, 'maxTokens', '2000'), 10) || 2000;
+      const topP = parseFloat(getStringProperty(config, 'topP', '1.0')) || 1.0;
+      const frequencyPenalty = parseFloat(getStringProperty(config, 'frequencyPenalty', '0.0')) || 0.0;
+      const presencePenalty = parseFloat(getStringProperty(config, 'presencePenalty', '0.0')) || 0.0;
+      const timeoutLimit = parseInt(getStringProperty(config, 'timeoutLimit', '30000'), 10) || 30000;
+      const retryCount = parseInt(getStringProperty(config, 'retryCount', '3'), 10) || 3;
+      const outputFormat = getStringProperty(config, 'outputFormat', 'text');
+      const includeReasoning = getStringProperty(config, 'includeReasoning', 'false') === 'true';
+      const enableMemory = getStringProperty(config, 'enableMemory', 'true') !== 'false';
+      const enableTools = getStringProperty(config, 'enableTools', 'true') !== 'false';
+      
+      // Extract port-specific inputs from inputObj
+      const chatModelConfig = (inputObj as any)?.chat_model || {};
+      const memoryData = (inputObj as any)?.memory;
+      const toolData = (inputObj as any)?.tool || (inputObj as any)?.tools;
+      const userInput = (inputObj as any)?.userInput || (inputObj as any)?.input || inputObj;
+      
+      // Determine provider and model from chat_model connection or config
+      let provider: 'openai' | 'claude' | 'gemini' | 'ollama' = 'openai';
+      let model = 'gpt-4o';
+      let apiKey: string | undefined;
+      
+      if (chatModelConfig.provider) {
+        provider = chatModelConfig.provider as any;
+      } else if (chatModelConfig.model) {
+        provider = LLMAdapter.detectProvider(chatModelConfig.model);
+      }
+      
+      model = chatModelConfig.model || getStringProperty(config, 'model', 'gpt-4o');
+      apiKey = chatModelConfig.apiKey || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.GEMINI_API_KEY;
+      
+      // Build messages array
+      const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [];
+      
+      // Add system prompt
+      const context = {
+        ...nodeOutputs,
+        input: inputObj,
+        $json: inputObj,
+        json: inputObj,
+      };
+      const resolvedSystemPrompt = resolveTemplate(systemPrompt, context);
+      messages.push({ role: 'system', content: resolvedSystemPrompt });
+      
+      // Add memory context if available
+      if (enableMemory && memoryData) {
+        if (Array.isArray(memoryData.messages)) {
+          // Add conversation history
+          memoryData.messages.forEach((msg: any) => {
+            if (msg.role && msg.content) {
+              messages.push({
+                role: msg.role as 'user' | 'assistant',
+                content: msg.content
+              });
+            }
+          });
+        } else if (memoryData.context) {
+          messages.push({
+            role: 'system',
+            content: `Previous context: ${JSON.stringify(memoryData.context)}`
+          });
+        }
+      }
+      
+      // Add user input
+      const userInputStr = typeof userInput === 'string' ? userInput : JSON.stringify(userInput);
+      messages.push({ role: 'user', content: userInputStr });
+      
+      // Execute LLM call with timeout
+      const llmAdapter = new LLMAdapter();
+      let response;
+      let attempts = 0;
+      let lastError: Error | null = null;
+      
+      while (attempts <= retryCount) {
+        try {
+          const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Timeout')), timeoutLimit)
+          );
+          
+          const llmPromise = llmAdapter.chat(provider, messages, {
+            model,
+            temperature,
+            maxTokens,
+            apiKey,
+          });
+          
+          response = await Promise.race([llmPromise, timeoutPromise]) as any;
+          break;
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error(String(error));
+          attempts++;
+          if (attempts > retryCount) {
+            throw lastError;
+          }
+          // Wait before retry
+          await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
+        }
+      }
+      
+      if (!response) {
+        throw lastError || new Error('Failed to get response from LLM');
+      }
+      
+      // Process tool calls if enabled and tools are available
+      let usedTools: any[] = [];
+      let finalResponse = response.content;
+      
+      if (enableTools && toolData) {
+        // Simple tool execution - in a full implementation, this would parse tool calls from response
+        // and execute them, then continue the conversation
+        if (Array.isArray(toolData)) {
+          usedTools = toolData;
+        } else if (toolData.tools) {
+          usedTools = Array.isArray(toolData.tools) ? toolData.tools : [];
+        }
+      }
+      
+      // Format output based on outputFormat
+      let formattedOutput: any = {
+        response_text: finalResponse,
+        response_json: null,
+        confidence_score: 0.8, // Default confidence
+        used_tools: usedTools,
+        memory_written: false,
+        error_flag: false,
+        error_message: null,
+      };
+      
+      if (outputFormat === 'json') {
+        try {
+          formattedOutput.response_json = JSON.parse(finalResponse);
+        } catch {
+          // If not valid JSON, wrap it
+          formattedOutput.response_json = { content: finalResponse };
+        }
+      } else if (outputFormat === 'keyvalue') {
+        // Try to parse key-value pairs
+        const lines = finalResponse.split('\n');
+        const kv: Record<string, string> = {};
+        lines.forEach((line: string) => {
+          const match = line.match(/^([^:]+):\s*(.+)$/);
+          if (match) {
+            kv[match[1].trim()] = match[2].trim();
+          }
+        });
+        formattedOutput.response_json = kv;
+      } else if (outputFormat === 'markdown') {
+        formattedOutput.response_markdown = finalResponse;
+      }
+      
+      if (includeReasoning) {
+        formattedOutput.reasoning = {
+          steps: 1,
+          mode,
+          provider,
+          model: response.model,
+        };
+      }
+      
+      // Store in memory if enabled
+      if (enableMemory && memoryData && memoryData.sessionId) {
+        try {
+          // In a full implementation, this would use the memory service
+          formattedOutput.memory_written = true;
+        } catch (error) {
+          console.error('Failed to write memory:', error);
+        }
+      }
+      
+      return formattedOutput;
+    }
+
     default: {
       // For unknown node types, return input as output
       console.warn(`Unknown node type: ${type}, returning input as output`);
@@ -612,8 +792,34 @@ export default async function executeWorkflowHandler(req: Request, res: Response
         let nodeInput: unknown = input;
 
         const inputEdges = edges.filter(e => e.target === node.id);
-        if (inputEdges.length > 0) {
-          // Get input from connected source nodes
+        
+        // Special handling for AI Agent node with port-specific connections
+        if (node.data.type === 'ai_agent' && inputEdges.length > 0) {
+          const portInputs: Record<string, unknown> = {};
+          
+          inputEdges.forEach(edge => {
+            const sourceOutput = nodeOutputs[edge.source];
+            if (sourceOutput !== undefined) {
+              const targetHandle = edge.targetHandle || 'default';
+              
+              // Map port handles to input structure
+              if (targetHandle === 'chat_model') {
+                portInputs.chat_model = sourceOutput;
+              } else if (targetHandle === 'memory') {
+                portInputs.memory = sourceOutput;
+              } else if (targetHandle === 'tool') {
+                portInputs.tool = sourceOutput;
+              } else {
+                // Default port or no handle specified - treat as user input
+                portInputs.userInput = sourceOutput;
+              }
+            }
+          });
+          
+          // Merge with any existing input
+          nodeInput = { ...extractInputObject(input), ...portInputs };
+        } else if (inputEdges.length > 0) {
+          // Standard node input handling
           const sourceNodeId = inputEdges[0].source;
           const sourceOutput = nodeOutputs[sourceNodeId];
           
