@@ -45,11 +45,8 @@ export class OllamaOrchestrator {
     // Website Chatbot
     'chichu-chat': ['qwen2.5:3b', 'qwen2.5:7b', 'mistral:7b'],
     
-    // Multimodal Processing
+    // Text Processing
     'text-analysis': ['qwen2.5:3b', 'mistral:7b'],
-    'image-understanding': ['llava:latest'],
-    // Note: Whisper is not a standard Ollama model - audio processing uses alternative models
-    'audio-processing': [], // Audio processing handled separately if needed
     
     // Code/Editing
     'code-generation': ['codellama:7b'],
@@ -73,7 +70,6 @@ export class OllamaOrchestrator {
       { name: 'qwen2.5:3b', capabilities: ['text', 'chat', 'fast'], size: '1.9GB' },
       { name: 'qwen2.5:7b', capabilities: ['text', 'chat', 'reasoning'], size: '4.7GB' },
       { name: 'codellama:7b', capabilities: ['code'], size: '3.8GB' },
-      { name: 'llava:latest', capabilities: ['image', 'multimodal'], size: '4.7GB' },
       { name: 'mistral:7b', capabilities: ['text', 'chat'], size: '4.4GB' },
     ];
 
@@ -318,11 +314,7 @@ export class OllamaOrchestrator {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         if (type === 'image-understanding' || type === 'image-comparison') {
-          return await ollamaManager.multimodal(
-            input.image || input.images?.[0],
-            input.prompt || input.question || 'Describe this image',
-            { model, temperature: options?.temperature }
-          );
+          throw new Error('Image analysis functionality has been removed. Multimodal features are no longer supported.');
         }
         
         if (type === 'code-generation' || type === 'code-assistance') {

@@ -47,9 +47,9 @@ const MODEL_CAPABILITIES = {
   },
   'llava:latest': {
     size: '4.7GB',
-    capabilities: ['image-analysis', 'multimodal', 'vision', 'image-description'],
+    capabilities: ['image-analysis', 'vision', 'image-description'],
     priority: 1, // Primary - only vision model
-    useCase: 'Image understanding, multimodal tasks'
+    useCase: 'Image understanding tasks'
   },
   
   // FALLBACK MODELS
@@ -312,54 +312,6 @@ export class OllamaManager {
     }
   }
 
-  /**
-   * Multimodal - Image analysis using LLaVA
-   */
-  async multimodal(
-    imageBase64: string,
-    prompt: string,
-    options: { model?: string; temperature?: number } = {}
-  ): Promise<{
-    content: string;
-    model: string;
-  }> {
-    const model = options.model || 'llava:latest';
-    
-    // Ensure LLaVA is loaded
-    if (!this.loadedModels.has(model)) {
-      await this.ensureModelsLoaded([model]);
-    }
-
-    try {
-      // Convert base64 to data URL if needed
-      const imageData = imageBase64.startsWith('data:') 
-        ? imageBase64 
-        : `data:image/jpeg;base64,${imageBase64}`;
-
-      const response = await this.ollama.chat({
-        model,
-        messages: [
-          {
-            role: 'user',
-            content: prompt,
-            images: [imageData],
-          },
-        ],
-        options: {
-          temperature: options.temperature ?? 0.7,
-        },
-        stream: false,
-      });
-
-      return {
-        content: response.message.content,
-        model: response.model,
-      };
-    } catch (error) {
-      console.error(`Error in multimodal with model ${model}:`, error);
-      throw error;
-    }
-  }
 
   /**
    * Generate embeddings

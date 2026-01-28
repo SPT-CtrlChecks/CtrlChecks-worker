@@ -6,6 +6,7 @@ import { getSupabaseClient } from '../core/database/supabase-compat';
 import { config } from '../core/config';
 import { LLMAdapter } from '../shared/llm-adapter';
 import { HuggingFaceRouterClient } from '../shared/huggingface-client';
+import { getGoogleAccessToken } from '../shared/google-sheets';
 
 interface WorkflowNode {
   id: string;
@@ -669,6 +670,418 @@ export async function executeNode(
       }
       
       return formattedOutput;
+    }
+
+    case 'schedule': {
+      // Schedule trigger - just pass through, scheduler service handles execution
+      return {
+        trigger: 'schedule',
+        workflow_id: workflowId,
+        ...inputObj,
+        executed_at: new Date().toISOString(),
+      };
+    }
+
+    case 'http_request': {
+      // HTTP Request node
+      const method = getStringProperty(config, 'method', 'GET').toUpperCase();
+      const url = getStringProperty(config, 'url', '');
+      const headersJson = getStringProperty(config, 'headers', '{}');
+      const bodyJson = getStringProperty(config, 'body', '');
+      const timeout = parseInt(getStringProperty(config, 'timeout', '30000'), 10) || 30000;
+      
+      if (!url) {
+        return {
+          ...inputObj,
+          _error: 'HTTP Request node: URL is required',
+        };
+      }
+
+      // Build context for template resolution
+      const context = {
+        input: inputObj,
+        ...nodeOutputs,
+        ...inputObj,
+        $json: inputObj,
+        json: inputObj,
+      };
+
+      const resolvedUrl = resolveTemplate(url, context);
+      let headers: Record<string, string> = {};
+      let body: string | undefined;
+
+      try {
+        headers = JSON.parse(resolveTemplate(headersJson, context));
+      } catch {
+        // If headers is not JSON, try as string
+        const resolvedHeaders = resolveTemplate(headersJson, context);
+        if (resolvedHeaders) {
+          try {
+            headers = JSON.parse(resolvedHeaders);
+          } catch {
+            // Default headers
+            headers = { 'Content-Type': 'application/json' };
+          }
+        }
+      }
+
+      if (bodyJson && ['POST', 'PUT', 'PATCH'].includes(method)) {
+        const resolvedBody = resolveTemplate(bodyJson, context);
+        try {
+          // Try to parse as JSON
+          body = JSON.stringify(JSON.parse(resolvedBody));
+        } catch {
+          // Use as string
+          body = resolvedBody;
+        }
+      }
+
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+        const response = await fetch(resolvedUrl, {
+          method,
+          headers,
+          body,
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+
+        const contentType = response.headers.get('content-type') || '';
+        let responseData: unknown;
+
+        if (contentType.includes('application/json')) {
+          responseData = await response.json();
+        } else {
+          responseData = await response.text();
+        }
+
+        return {
+          ...inputObj,
+          status: response.status,
+          statusText: response.statusText,
+          headers: Object.fromEntries(response.headers.entries()),
+          data: responseData,
+          url: resolvedUrl,
+        };
+      } catch (error) {
+        console.error('HTTP Request error:', error);
+        return {
+          ...inputObj,
+          _error: error instanceof Error ? error.message : 'HTTP Request failed',
+          url: resolvedUrl,
+        };
+      }
+    }
+
+    case 'javascript': {
+      // JavaScript code execution node
+      const code = getStringProperty(config, 'code', '');
+      
+      if (!code) {
+        return {
+          ...inputObj,
+          _error: 'JavaScript node: Code is required',
+        };
+      }
+
+      // Build context for code execution
+      const context = {
+        input: inputObj,
+        ...nodeOutputs,
+        ...inputObj,
+        $json: inputObj,
+        json: inputObj,
+      };
+
+      try {
+        // Create a safe execution context
+        // Note: Using eval is not ideal for security, but needed for dynamic code execution
+        // In production, consider using vm2 or isolated-vm for better security
+        const wrappedCode = `
+          (function() {
+            const input = ${JSON.stringify(inputObj)};
+            const $json = ${JSON.stringify(inputObj)};
+            const json = ${JSON.stringify(inputObj)};
+            const nodeOutputs = ${JSON.stringify(nodeOutputs)};
+            
+            ${code}
+            
+            // If code doesn't return anything, return input
+            return typeof result !== 'undefined' ? result : input;
+          })()
+        `;
+
+        const result = eval(wrappedCode);
+        return result;
+      } catch (error) {
+        console.error('JavaScript execution error:', error);
+        return {
+          ...inputObj,
+          _error: error instanceof Error ? error.message : 'JavaScript execution failed',
+        };
+      }
+    }
+
+    case 'google_sheets': {
+      // Google Sheets node
+      const spreadsheetId = getStringProperty(config, 'spreadsheetId', '');
+      const sheetName = getStringProperty(config, 'sheetName', 'Sheet1');
+      const range = getStringProperty(config, 'range', '');
+      const operation = getStringProperty(config, 'operation', 'read');
+      const dataJson = getStringProperty(config, 'data', '[]');
+
+      if (!spreadsheetId) {
+        return {
+          ...inputObj,
+          _error: 'Google Sheets node: Spreadsheet ID is required',
+        };
+      }
+
+      // Build context
+      const context = {
+        input: inputObj,
+        ...nodeOutputs,
+        ...inputObj,
+        $json: inputObj,
+        json: inputObj,
+      };
+
+      const resolvedSpreadsheetId = resolveTemplate(spreadsheetId, context);
+      const resolvedSheetName = resolveTemplate(sheetName, context);
+      const resolvedRange = range ? resolveTemplate(range, context) : undefined;
+
+      try {
+        // Check if credentials are configured first
+        const hasCredentials = config.googleOAuthClientId && config.googleOAuthClientSecret;
+        
+        if (!hasCredentials) {
+          return {
+            ...inputObj,
+            _error: 'Google Sheets node: Google OAuth credentials are not configured. Please configure GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET environment variables.',
+          };
+        }
+
+        // Get access token from user's OAuth tokens
+        const accessToken = userId ? await getGoogleAccessToken(supabase, userId) : null;
+        
+        if (!accessToken) {
+          return {
+            ...inputObj,
+            _error: 'Google Sheets node: No Google OAuth token found. Please authenticate with Google first.',
+          };
+        }
+
+        // Build the API URL
+        let apiUrl = `https://sheets.googleapis.com/v4/spreadsheets/${resolvedSpreadsheetId}/values/`;
+        if (resolvedRange) {
+          apiUrl += `${resolvedSheetName}!${resolvedRange}`;
+        } else {
+          apiUrl += resolvedSheetName;
+        }
+
+        if (operation === 'read') {
+          const response = await fetch(`${apiUrl}?valueRenderOption=UNFORMATTED_VALUE`, {
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+            },
+          });
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Google Sheets API error: ${errorText}`);
+          }
+
+          const result = await response.json() as { values?: unknown[][]; range?: string };
+          return {
+            ...inputObj,
+            values: result.values || [],
+            range: result.range,
+          };
+        } else if (operation === 'write' || operation === 'append') {
+          let data: unknown[][];
+          try {
+            const resolvedData = resolveTemplate(dataJson, context);
+            data = JSON.parse(resolvedData);
+          } catch {
+            // Try to extract data from input
+            data = Array.isArray(inputObj.data) ? inputObj.data : [[inputObj]];
+          }
+
+          const method = operation === 'append' ? 'POST' : 'PUT';
+          const url = operation === 'append' ? `${apiUrl}:append?valueInputOption=RAW` : `${apiUrl}?valueInputOption=RAW`;
+
+          const response = await fetch(url, {
+            method,
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              values: data,
+            }),
+          });
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Google Sheets API error: ${errorText}`);
+          }
+
+          const result = await response.json() as {
+            updates?: { updatedRange?: string; updatedRows?: number; updatedColumns?: number };
+            updatedRange?: string;
+            updatedRows?: number;
+            updatedColumns?: number;
+          };
+          return {
+            ...inputObj,
+            updatedRange: result.updates?.updatedRange || result.updatedRange,
+            updatedRows: result.updates?.updatedRows || result.updatedRows,
+            updatedColumns: result.updates?.updatedColumns || result.updatedColumns,
+          };
+        } else {
+          return {
+            ...inputObj,
+            _error: `Google Sheets node: Unsupported operation: ${operation}`,
+          };
+        }
+      } catch (error) {
+        // Only log unexpected errors, not configuration/auth issues
+        const errorMessage = error instanceof Error ? error.message : 'Google Sheets operation failed';
+        const isConfigError = errorMessage.includes('credentials') || errorMessage.includes('authenticate') || errorMessage.includes('OAuth');
+        
+        if (!isConfigError) {
+          console.error('Google Sheets error:', error);
+        }
+        
+        return {
+          ...inputObj,
+          _error: `Google Sheets node: ${errorMessage}`,
+        };
+      }
+    }
+
+    case 'twitter': {
+      // Twitter/X API node
+      const operation = getStringProperty(config, 'operation', 'tweet');
+      const text = getStringProperty(config, 'text', '');
+      const apiKey = getStringProperty(config, 'apiKey', '') || process.env.TWITTER_API_KEY || '';
+      const apiSecret = getStringProperty(config, 'apiSecret', '') || process.env.TWITTER_API_SECRET || '';
+      const accessToken = getStringProperty(config, 'accessToken', '') || process.env.TWITTER_ACCESS_TOKEN || '';
+      const accessTokenSecret = getStringProperty(config, 'accessTokenSecret', '') || process.env.TWITTER_ACCESS_TOKEN_SECRET || '';
+
+      // Build context
+      const context = {
+        input: inputObj,
+        ...nodeOutputs,
+        ...inputObj,
+        $json: inputObj,
+        json: inputObj,
+      };
+
+      const resolvedText = resolveTemplate(text, context);
+
+      if (!resolvedText && operation === 'tweet') {
+        return {
+          ...inputObj,
+          _error: 'Twitter node: Text is required for tweet operation',
+        };
+      }
+
+      if (!apiKey || !apiSecret || !accessToken || !accessTokenSecret) {
+        return {
+          ...inputObj,
+          _error: 'Twitter node: API credentials are required. Set TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_ACCESS_TOKEN, and TWITTER_ACCESS_TOKEN_SECRET environment variables or configure in node settings.',
+        };
+      }
+
+      // Note: Twitter API v2 requires OAuth 1.0a signing
+      // This is a simplified implementation - full implementation would use oauth library
+      return {
+        ...inputObj,
+        _error: 'Twitter node: Full Twitter API integration requires OAuth 1.0a signing. Please use a dedicated Twitter integration service or implement OAuth signing.',
+        operation,
+        text: resolvedText,
+      };
+    }
+
+    case 'linkedin': {
+      // LinkedIn API node
+      const operation = getStringProperty(config, 'operation', 'post');
+      const text = getStringProperty(config, 'text', '');
+      const accessToken = getStringProperty(config, 'accessToken', '') || process.env.LINKEDIN_ACCESS_TOKEN || '';
+
+      // Build context
+      const context = {
+        input: inputObj,
+        ...nodeOutputs,
+        ...inputObj,
+        $json: inputObj,
+        json: inputObj,
+      };
+
+      const resolvedText = resolveTemplate(text, context);
+
+      if (!resolvedText && operation === 'post') {
+        return {
+          ...inputObj,
+          _error: 'LinkedIn node: Text is required for post operation',
+        };
+      }
+
+      if (!accessToken) {
+        return {
+          ...inputObj,
+          _error: 'LinkedIn node: Access token is required. Set LINKEDIN_ACCESS_TOKEN environment variable or configure in node settings.',
+        };
+      }
+
+      try {
+        // LinkedIn API v2 endpoint
+        const response = await fetch('https://api.linkedin.com/v2/ugcPosts', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+            'X-Restli-Protocol-Version': '2.0.0',
+          },
+          body: JSON.stringify({
+            author: `urn:li:person:${getStringProperty(config, 'personUrn', '')}`,
+            lifecycleState: 'PUBLISHED',
+            specificContent: {
+              'com.linkedin.ugc.ShareContent': {
+                shareCommentary: {
+                  text: resolvedText,
+                },
+                shareMediaCategory: 'NONE',
+              },
+            },
+            visibility: {
+              'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC',
+            },
+          }),
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`LinkedIn API error: ${errorText}`);
+        }
+
+        const result = await response.json() as { id?: string };
+        return {
+          ...inputObj,
+          postId: result.id,
+          success: true,
+        };
+      } catch (error) {
+        console.error('LinkedIn error:', error);
+        return {
+          ...inputObj,
+          _error: error instanceof Error ? error.message : 'LinkedIn operation failed',
+        };
+      }
     }
 
     default: {

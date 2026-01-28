@@ -27,8 +27,6 @@ import formTriggerRoute from './api/form-trigger';
 import generateWorkflowRoute from './api/generate-workflow';
 import executeAgentRoute from './api/execute-agent';
 import chatbotRoute from './api/chatbot';
-import executeMultimodalAgentRoute from './api/execute-multimodal-agent';
-import buildMultimodalAgentRoute from './api/build-multimodal-agent';
 import analyzeWorkflowRequirementsRoute from './api/analyze-workflow-requirements';
 import processRoute from './api/process';
 import executeNodeRoute from './api/execute-node';
@@ -81,8 +79,6 @@ app.get('/health', asyncHandler(async (req: Request, res: Response) => {
       '/api/generate-workflow',
       '/api/execute-agent',
       '/api/chatbot',
-      '/api/execute-multimodal-agent',
-      '/api/build-multimodal-agent',
       '/api/analyze-workflow-requirements',
       '/api/ai/generate',
       '/api/ai/chat',
@@ -135,9 +131,6 @@ app.post('/api/execute-agent', asyncHandler(executeAgentRoute));
 app.post('/api/chatbot', asyncHandler(chatbotRoute));
 app.post('/chatbot', asyncHandler(chatbotRoute)); // Alias for frontend compatibility
 
-// Multimodal Agent Routes
-app.post('/api/execute-multimodal-agent', asyncHandler(executeMultimodalAgentRoute));
-app.post('/api/build-multimodal-agent', asyncHandler(buildMultimodalAgentRoute));
 
 // Process Route - Direct proxy to FastAPI backend
 app.post('/process', asyncHandler(processRoute));
@@ -189,19 +182,11 @@ app.post('/api/ai/chat', asyncHandler(async (req: Request, res: Response) => {
 }));
 
 app.post('/api/ai/analyze-image', asyncHandler(async (req: Request, res: Response) => {
-  const { image, question, model } = req.body;
-  
-  if (!image) {
-    return res.status(400).json({ success: false, error: 'Image is required' });
-  }
-
-  const result = await ollamaManager.multimodal(
-    image,
-    question || 'Describe this image in detail',
-    { model }
-  );
-
-  res.json({ success: true, result });
+  // Multimodal functionality has been removed
+  res.status(501).json({ 
+    success: false, 
+    error: 'Image analysis functionality has been removed. Multimodal features are no longer supported.' 
+  });
 }));
 
 app.get('/api/ai/models', asyncHandler(async (req: Request, res: Response) => {
@@ -312,8 +297,6 @@ async function startServer() {
       console.log(`  POST /api/execute-agent`);
       console.log(`  POST /api/chatbot`);
       console.log(`  POST /chatbot`);
-      console.log(`  POST /api/execute-multimodal-agent`);
-      console.log(`  POST /api/build-multimodal-agent`);
       console.log(`  POST /api/analyze-workflow-requirements`);
       console.log(`  POST /process - Proxy to FastAPI backend`);
       console.log(`  POST /execute-node - Debug single node execution`);
@@ -327,9 +310,6 @@ async function startServer() {
       console.log(`  GET  /api/ai/metrics - AI performance metrics`);
       console.log(`\n🤖 AI Gateway Endpoints:`);
       console.log(`  POST /api/ai/chatbot/message - Chichu chatbot`);
-      console.log(`  POST /api/ai/multimodal/process - Multimodal processing`);
-      console.log(`  POST /api/ai/text/analyze - Text analysis`);
-      console.log(`  POST /api/ai/image/describe - Image description`);
       console.log(`  POST /api/ai/editor/suggest-improvements - Workflow node suggestions`);
       console.log(`  POST /api/ai/builder/generate-from-prompt - Generate workflow from prompt`);
       console.log(`  POST /api/ai/ollama/generate - Direct Ollama generation`);

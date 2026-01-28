@@ -6,7 +6,6 @@
 import { Router, Request, Response } from 'express';
 import { ollamaOrchestrator } from '../services/ai/ollama-orchestrator';
 import { chichuChatbot } from '../services/ai/chichu-chatbot';
-import { multimodalProcessor, TextProcessor, ImageProcessor, AudioProcessor } from '../services/ai/multimodal-processors';
 import { aiWorkflowEditor } from '../services/ai/workflow-editor';
 import { agenticWorkflowBuilder } from '../services/ai/workflow-builder';
 import { aiPerformanceMonitor } from '../services/ai/performance-monitor';
@@ -86,144 +85,49 @@ router.delete('/chatbot/session/:sessionId', async (req: Request, res: Response)
   }
 });
 
-// ==================== MULTIMODAL PROCESSING ====================
-router.post('/multimodal/process', async (req: Request, res: Response) => {
-  try {
-    const { text, images, audio, context, processingTypes } = req.body;
-    
-    const result = await multimodalProcessor.process({
-      text,
-      images,
-      audio,
-      context,
-      processingTypes,
-    });
-    
-    res.json({ success: true, result });
-  } catch (error) {
-    console.error('Multimodal processing error:', error);
-    res.status(500).json({ 
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
-  }
-});
-
-// Text-specific endpoints
+// Text-specific endpoints - Multimodal processors removed
 router.post('/text/analyze', async (req: Request, res: Response) => {
-  try {
-    const { text, analysisType, options } = req.body;
-    
-    if (!text) {
-      return res.status(400).json({ error: 'Text is required' });
-    }
-    
-    const textProcessor = new TextProcessor();
-    const result = await textProcessor.analyze(text, analysisType || 'sentiment', options);
-    res.json({ success: true, result });
-  } catch (error) {
-    res.status(500).json({ 
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
-  }
+  res.status(501).json({ 
+    success: false,
+    error: 'Text analysis functionality has been removed. Multimodal features are no longer supported.' 
+  });
 });
 
 router.post('/text/summarize', async (req: Request, res: Response) => {
-  try {
-    const { text, length } = req.body;
-    
-    if (!text) {
-      return res.status(400).json({ error: 'Text is required' });
-    }
-    
-    const textProcessor = new TextProcessor();
-    const result = await textProcessor.summarize(text, length || 'medium');
-    res.json({ success: true, summary: result });
-  } catch (error) {
-    res.status(500).json({ 
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
-  }
+  res.status(501).json({ 
+    success: false,
+    error: 'Text summarization functionality has been removed. Multimodal features are no longer supported.' 
+  });
 });
 
 router.post('/text/extract-entities', async (req: Request, res: Response) => {
-  try {
-    const { text } = req.body;
-    
-    if (!text) {
-      return res.status(400).json({ error: 'Text is required' });
-    }
-    
-    const textProcessor = new TextProcessor();
-    const result = await textProcessor.extractEntities(text);
-    res.json({ success: true, entities: result });
-  } catch (error) {
-    res.status(500).json({ 
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
-  }
+  res.status(501).json({ 
+    success: false,
+    error: 'Entity extraction functionality has been removed. Multimodal features are no longer supported.' 
+  });
 });
 
-// Image-specific endpoints
+// Image-specific endpoints - Multimodal processors removed
 router.post('/image/describe', async (req: Request, res: Response) => {
-  try {
-    const { image, detailLevel, options } = req.body;
-    
-    if (!image) {
-      return res.status(400).json({ error: 'Image is required (base64 or data URL)' });
-    }
-    
-    const imageProcessor = new ImageProcessor();
-    const result = await imageProcessor.describe(image, detailLevel || 'detailed');
-    res.json({ success: true, result });
-  } catch (error) {
-    res.status(500).json({ 
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
-  }
+  res.status(501).json({ 
+    success: false,
+    error: 'Image description functionality has been removed. Multimodal features are no longer supported.' 
+  });
 });
 
 router.post('/image/compare', async (req: Request, res: Response) => {
-  try {
-    const { images, comparisonType } = req.body;
-    
-    if (!images || !Array.isArray(images) || images.length < 2) {
-      return res.status(400).json({ error: 'At least 2 images are required' });
-    }
-    
-    const imageProcessor = new ImageProcessor();
-    const result = await imageProcessor.compareImages(images, comparisonType || 'similarity');
-    res.json({ success: true, result });
-  } catch (error) {
-    res.status(500).json({ 
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
-  }
+  res.status(501).json({ 
+    success: false,
+    error: 'Image comparison functionality has been removed. Multimodal features are no longer supported.' 
+  });
 });
 
-// Audio-specific endpoints
+// Audio-specific endpoints - Multimodal processors removed
 router.post('/audio/transcribe', async (req: Request, res: Response) => {
-  try {
-    const { audio, language, options } = req.body;
-    
-    if (!audio) {
-      return res.status(400).json({ error: 'Audio is required (base64)' });
-    }
-    
-    const audioProcessor = new AudioProcessor();
-    const result = await audioProcessor.transcribe(audio, language);
-    res.json({ success: true, result });
-  } catch (error) {
-    res.status(500).json({ 
-      success: false,
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
-  }
+  res.status(501).json({ 
+    success: false,
+    error: 'Audio transcription functionality has been removed. Multimodal features are no longer supported.' 
+  });
 });
 
 // ==================== AI WORKFLOW EDITOR ====================

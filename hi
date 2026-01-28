@@ -1,0 +1,22 @@
+SUPABASE_URL=https://nvrrqvlqnnvlihtlgmzn.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im52cnJxdmxxbm52bGlodGxnbXpuIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NTQ2NDkwMywiZXhwIjoyMDgxMDQwOTAzfQ.s78wC4CLp2ci8nGgvMNCk-ePBALIcNdlf_jFS9Oevqg
+SUPABASE_JWT_SECRET=aJ1QmpQCTh+9Z9vm8NvGExn1jm0s7yImYXKu9C0JdZ/gmphkL/yk1nTefEuQDuGARgFNWIAmMFZRARvzpMf7JQ==
+# Ollama Configuration (Optional - for AI features)
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_HOST=http://localhost:11434
+# FastAPI Ollama Service (Optional - for multimodal AI)
+# PYTHON_BACKEND_URL=http://localhost:8000
+# Worker proxies /process to FastAPI (port 8000)
+# FASTAPI_OLLAMA_URL=http://localhost:8000
+# Server Configuration
+FASTAPI_OLLAMA_URL=http://ollama.ctrlchecks.ai:8000
+PYTHON_BACKEND_URL=http://ollama.ctrlchecks.ai:8000
+PORT=3001
+PUBLIC_BASE_URL=http://localhost:3001
+WORKER_ID=worker-local
+LOG_LEVEL=INFO
+PROCESS_TIMEOUT_SECONDS=1800
+MAX_RETRIES=3
+# CORS Configuration
+CORS_ORIGIN=http://localhost:5173
+ALLOWED_ORIGINS=*

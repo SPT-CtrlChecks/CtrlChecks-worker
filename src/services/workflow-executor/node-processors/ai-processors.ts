@@ -115,36 +115,8 @@ export class CodeGeneratorProcessor {
  */
 export class ImageUnderstandingProcessor {
   async process(input: AIProcessorInput, config: AIProcessorConfig): Promise<any> {
-    const startTime = Date.now();
-    
-    try {
-      const { imageBase64, question = 'Describe this image in detail' } = input;
-      if (!imageBase64) {
-        throw new Error('Image input is required');
-      }
-
-      const description = await aiAdapter.imageAnalysis(
-        imageBase64,
-        question,
-        {
-          model: config.model || 'llava:latest',
-          temperature: config.temperature ?? 0.7,
-        }
-      );
-
-      const duration = Date.now() - startTime;
-      metricsTracker.trackRequest('llava:latest', true, duration);
-
-      return {
-        imageDescription: description,
-        question,
-        model: 'llava:latest',
-      };
-    } catch (error) {
-      const duration = Date.now() - startTime;
-      metricsTracker.trackRequest('llava:latest', false, duration, 'image-analysis-error');
-      throw error;
-    }
+    // Multimodal functionality has been removed
+    throw new Error('Image understanding functionality has been removed. Multimodal features are no longer supported.');
   }
 }
 

@@ -56,7 +56,6 @@ export class ModelManager {
     return [
       'qwen2.5:3b',      // 1.9GB - Fast, general purpose
       'codellama:7b',    // 3.8GB - Code generation
-      'llava:latest',   // 4.7GB - Multimodal/vision
     ];
     // Total: ~10.4GB - Fits in g4dn.xlarge (16GB GPU) or larger
   }
@@ -119,7 +118,6 @@ export class ModelManager {
     const capabilities: Record<string, string[]> = {
       'qwen2.5:3b': ['text-generation', 'chat', 'multilingual', 'reasoning'],
       'codellama:7b': ['code-generation', 'code-analysis', 'debugging'],
-      'llava:latest': ['image-analysis', 'multimodal', 'vision'],
       'mistral:7b': ['text-generation', 'summarization', 'chat'],
       'llama3.1:8b': ['text-generation', 'reasoning', 'chat'],
       'qwen2.5:7b': ['text-generation', 'multilingual', 'chat'],

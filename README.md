@@ -27,8 +27,6 @@ npm run dev
 - `POST /api/execute-agent` - Execute agent workflow
 - `POST /api/chat-api` - Chat API for workflows
 - `POST /api/chatbot` - Website chatbot
-- `POST /api/execute-multimodal-agent` - Execute multimodal agent
-- `POST /api/build-multimodal-agent` - Build multimodal agent
 - `POST /api/analyze-workflow-requirements` - Analyze workflow requirements
 - `GET /api/admin-templates` - List templates
 - `POST /api/copy-template` - Copy template
@@ -82,8 +80,6 @@ npm run type-check
 - ✅ execute-agent
 - ✅ chat-api
 - ✅ chatbot
-- ✅ execute-multimodal-agent
-- ✅ build-multimodal-agent
 - ✅ analyze-workflow-requirements
 - ✅ admin-templates
 - ✅ copy-template

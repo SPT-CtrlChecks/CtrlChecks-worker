@@ -29,6 +29,16 @@ export async function getGoogleAccessToken(
   userId: string
 ): Promise<string | null> {
   try {
+    // Check if credentials are configured before attempting any token operations
+    const clientId = config.googleOAuthClientId;
+    const clientSecret = config.googleOAuthClientSecret;
+    
+    if (!clientId || !clientSecret) {
+      // Return null instead of throwing - this is an expected configuration state
+      // The caller will handle this gracefully
+      return null;
+    }
+
     const { data: tokenData, error } = await supabase
       .from('google_oauth_tokens')
       .select('access_token, refresh_token, expires_at')
@@ -36,7 +46,8 @@ export async function getGoogleAccessToken(
       .single();
 
     if (error || !tokenData) {
-      throw new Error('No Google OAuth token found. Please authenticate with Google first.');
+      // Return null for missing token - expected state if user hasn't authenticated
+      return null;
     }
 
     const expiresAt = tokenData.expires_at ? new Date(tokenData.expires_at) : null;
@@ -53,14 +64,18 @@ export async function getGoogleAccessToken(
         if (refreshedToken) {
           return refreshedToken;
         }
+        // Refresh failed - return null so caller can handle gracefully
+        return null;
       }
-      throw new Error('Google OAuth token expired. Please re-authenticate.');
+      // Token expired and no refresh token - return null
+      return null;
     }
 
     return tokenData.access_token;
   } catch (error) {
-    console.error('Error getting Google access token:', error);
-    throw error;
+    // Only log unexpected errors, not configuration issues
+    console.error('[Google OAuth] Unexpected error getting access token:', error);
+    return null;
   }
 }
 
@@ -74,7 +89,7 @@ async function refreshGoogleToken(
     const clientSecret = config.googleOAuthClientSecret;
 
     if (!clientId || !clientSecret) {
-      console.error('[Google OAuth] Credentials not configured');
+      // Return null instead of throwing - credentials not configured
       return null;
     }
 

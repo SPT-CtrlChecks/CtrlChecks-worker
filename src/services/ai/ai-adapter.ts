@@ -83,14 +83,9 @@ export class AIAdapter {
     question: string = 'Describe this image in detail',
     options: ImageAnalysisOptions = {}
   ): Promise<string> {
-    const result = await this.ollama.multimodal(
-      imageBase64,
-      question,
-      {
-        model: options.model || 'llava:latest',
-        temperature: options.temperature ?? 0.7,
-      }
-    );
+    throw new Error('Image analysis functionality has been removed. Multimodal features are no longer supported.');
+    // Removed multimodal support
+    const result = null as any;
 
     return result.content;
   }
