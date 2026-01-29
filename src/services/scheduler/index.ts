@@ -17,6 +17,9 @@ class SchedulerService {
   private supabase: any;
   private jobs: Map<string, cron.ScheduledTask> = new Map();
   private initialized: boolean = false;
+  private lastNetworkError: number = 0; // Track last network error to avoid log spam
+  private consecutiveErrors: number = 0; // Track consecutive errors for backoff
+  private lastSuccessfulLoad: number = 0; // Track last successful load
 
   constructor() {
     // Don't initialize Supabase client in constructor
@@ -56,7 +59,19 @@ class SchedulerService {
     await this.loadScheduledWorkflows();
     
     // Set up periodic check for new schedules (every minute)
+    // Use exponential backoff if there are consecutive errors
     cron.schedule('* * * * *', async () => {
+      // Skip if we've had too many consecutive errors (backoff)
+      if (this.consecutiveErrors >= 5) {
+        const backoffMinutes = Math.min(5, Math.pow(2, Math.floor(this.consecutiveErrors / 5)));
+        const timeSinceLastError = Date.now() - this.lastNetworkError;
+        if (timeSinceLastError < backoffMinutes * 60000) {
+          return; // Still in backoff period
+        }
+        // Reset error count after backoff period
+        this.consecutiveErrors = 0;
+      }
+      
       await this.loadScheduledWorkflows();
     });
     
@@ -72,12 +87,19 @@ class SchedulerService {
     }
 
     try {
+      // Add timeout wrapper for Supabase requests
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('Request timeout')), 10000); // 10 second timeout
+      });
+
       // First, try to check if schedule column exists by querying workflow metadata
       // If schedule column doesn't exist, gracefully skip scheduled workflows
-      const { data: workflows, error } = await this.supabase
+      const queryPromise = this.supabase
         .from('workflows')
         .select('id, name, status')
         .eq('status', 'active');
+
+      const { data: workflows, error } = await Promise.race([queryPromise, timeoutPromise]) as any;
 
       if (error) {
         // Check if error is due to missing column
@@ -86,6 +108,31 @@ class SchedulerService {
           // This happens when the database schema hasn't been migrated yet
           return;
         }
+        
+        // Check if it's an SSL/network error - don't spam logs
+        const errorMessage = error.message?.toLowerCase() || '';
+        const errorDetails = String(error.details || '').toLowerCase();
+        const isNetworkError = errorMessage.includes('ssl') || 
+                              errorMessage.includes('fetch failed') || 
+                              errorMessage.includes('timeout') ||
+                              errorMessage.includes('err_ssl') ||
+                              errorDetails.includes('ssl') ||
+                              errorDetails.includes('tls_get_more_records');
+        
+        if (isNetworkError) {
+          this.consecutiveErrors++;
+          this.lastNetworkError = Date.now();
+          
+          // Only log network errors occasionally to avoid spam
+          if (this.consecutiveErrors === 1 || this.consecutiveErrors % 10 === 0) {
+            console.warn(`⚠️  Scheduler: Network/SSL error (${this.consecutiveErrors} consecutive). This may indicate a network/proxy issue.`);
+          }
+          return;
+        }
+        
+        // Reset error count for non-network errors
+        this.consecutiveErrors = 0;
+        
         console.error('Error loading scheduled workflows:', error);
         return;
       }
@@ -94,11 +141,31 @@ class SchedulerService {
 
       // Try to get schedule column if it exists (optional)
       // Query workflows with schedule column separately to avoid errors
-      const { data: workflowsWithSchedule, error: scheduleError } = await this.supabase
+      const scheduleQueryPromise = this.supabase
         .from('workflows')
         .select('id, schedule')
         .eq('status', 'active')
         .not('schedule', 'is', null);
+
+      const scheduleTimeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('Request timeout')), 10000);
+      });
+
+      let workflowsWithSchedule: any = null;
+      let scheduleError: any = null;
+
+      try {
+        const result = await Promise.race([scheduleQueryPromise, scheduleTimeoutPromise]) as any;
+        workflowsWithSchedule = result.data;
+        scheduleError = result.error;
+      } catch (timeoutError: any) {
+        const errorMessage = timeoutError?.message?.toLowerCase() || '';
+        if (errorMessage.includes('timeout') || errorMessage.includes('ssl') || errorMessage.includes('fetch')) {
+          // Network/timeout error - silently skip
+          return;
+        }
+        scheduleError = timeoutError;
+      }
 
       // If schedule column doesn't exist, just return (no scheduled workflows)
       if (scheduleError && (scheduleError.code === '42703' || scheduleError.message?.includes('does not exist'))) {
@@ -131,8 +198,28 @@ class SchedulerService {
           this.scheduleWorkflow(workflow.id, schedule);
         }
       }
-    } catch (error) {
-      console.error('Error in scheduler:', error);
+      
+      // Reset error count on successful load
+      if (this.consecutiveErrors > 0) {
+        this.consecutiveErrors = 0;
+        this.lastSuccessfulLoad = Date.now();
+      }
+    } catch (error: any) {
+      const errorMessage = error?.message?.toLowerCase() || '';
+      const isNetworkError = errorMessage.includes('timeout') || 
+                            errorMessage.includes('ssl') ||
+                            errorMessage.includes('fetch');
+      
+      if (isNetworkError) {
+        this.consecutiveErrors++;
+        this.lastNetworkError = Date.now();
+        // Only log occasionally
+        if (this.consecutiveErrors === 1 || this.consecutiveErrors % 10 === 0) {
+          console.warn(`⚠️  Scheduler: Network error (${this.consecutiveErrors} consecutive). Retrying with backoff...`);
+        }
+      } else {
+        console.error('Error in scheduler:', error);
+      }
     }
   }
 

@@ -151,6 +151,12 @@ export interface Requirements {
   constraints: string[];
   stakeholders?: string[];
   complexity: 'simple' | 'medium' | 'complex';
+  // Extended requirements for Step 4
+  urls?: string[];
+  apis?: string[];
+  credentials?: string[];
+  schedules?: string[];
+  platforms?: string[];
 }
 
 // Structure for workflow generation

@@ -19,6 +19,7 @@ export interface OllamaGenerationOptions {
   max_tokens?: number;
   stream?: boolean;
   images?: string[];
+  __fallbackAttempt?: number; // Internal: track fallback attempts
 }
 
 export interface OllamaChatMessage {
@@ -88,6 +89,29 @@ export class OllamaManager {
   constructor(endpoint?: string) {
     this.endpoint = endpoint || config.ollamaHost || 'http://localhost:11434';
     this.ollama = new Ollama({ host: this.endpoint });
+  }
+
+  /**
+   * Wrapper for fetch with extended timeout
+   */
+  private async fetchWithTimeout(url: string, options: any = {}, timeoutMs: number = 600000): Promise<Response> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      return response;
+    } catch (error: any) {
+      clearTimeout(timeoutId);
+      if (error.name === 'AbortError') {
+        throw new Error(`Request timeout after ${timeoutMs}ms`);
+      }
+      throw error;
+    }
   }
 
   /**
@@ -176,10 +200,14 @@ export class OllamaManager {
       await this.ensureModelsLoaded([model]);
     }
 
+    // Extended timeout for large model responses (10 minutes)
+    // Increased from 5min to handle slow models and complex prompts
+    const TIMEOUT_MS = 600000;
+    
     try {
       if (options.stream) {
-        // Handle streaming
-        const stream = await this.ollama.generate({
+        // Handle streaming with timeout
+        const generatePromise = this.ollama.generate({
           model,
           prompt,
           system: options.system,
@@ -189,6 +217,12 @@ export class OllamaManager {
           },
           stream: true,
         });
+
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error(`Stream generation timeout after ${TIMEOUT_MS}ms`)), TIMEOUT_MS);
+        });
+
+        const stream = await Promise.race([generatePromise, timeoutPromise]);
 
         let fullContent = '';
         for await (const chunk of stream) {
@@ -200,8 +234,8 @@ export class OllamaManager {
           model,
         };
       } else {
-        // Non-streaming
-        const response = await this.ollama.generate({
+        // Non-streaming with timeout
+        const generatePromise = this.ollama.generate({
           model,
           prompt,
           system: options.system,
@@ -211,6 +245,12 @@ export class OllamaManager {
           },
           stream: false,
         });
+
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error(`Generation timeout after ${TIMEOUT_MS}ms`)), TIMEOUT_MS);
+        });
+
+        const response = await Promise.race([generatePromise, timeoutPromise]);
 
         return {
           content: response.response,
@@ -222,15 +262,51 @@ export class OllamaManager {
           },
         };
       }
-    } catch (error) {
+    } catch (error: any) {
+      const errorMessage = error?.message || String(error);
+      const isTimeout = errorMessage.includes('timeout') || errorMessage.includes('Timeout') || errorMessage.includes('UND_ERR');
+      
       console.error(`Error generating with model ${model}:`, error);
       
-      // Try fallback model
-      if (model !== 'qwen2.5:3b') {
-        console.log(`🔄 Trying fallback model: qwen2.5:3b`);
-        return this.generate(prompt, { ...options, model: 'qwen2.5:3b' });
+      if (isTimeout) {
+        console.warn(`⏱️  Timeout error with model ${model}. This may indicate the model is slow or Ollama service is overloaded.`);
       }
       
+      // Try fallback models in order: mistral:7b -> qwen2.5:7b
+      // Don't fallback to the same model that failed
+      const fallbackChain: Record<string, string[]> = {
+        'qwen2.5:3b': ['mistral:7b', 'qwen2.5:7b'],
+        'mistral:7b': ['qwen2.5:7b'],
+        'qwen2.5:7b': ['mistral:7b'],
+        'codellama:7b': ['mistral:7b', 'qwen2.5:7b'],
+      };
+      
+      const fallbacks = fallbackChain[model] || ['mistral:7b', 'qwen2.5:7b'];
+      
+      if (fallbacks.length > 0) {
+        const fallbackModel = fallbacks[0];
+        console.log(`🔄 Trying fallback model: ${fallbackModel} (was using ${model})`);
+        
+        // Reduce max_tokens on retry to prevent timeout (reduce by 30%)
+        const reducedMaxTokens = options.max_tokens 
+          ? Math.floor(options.max_tokens * 0.7)
+          : undefined;
+        
+        // Prevent infinite recursion by tracking attempts
+        const attemptCount = (options as any).__fallbackAttempt || 0;
+        if (attemptCount >= 2) {
+          throw new Error(`All fallback models exhausted. Original error: ${errorMessage}`);
+        }
+        
+        return this.generate(prompt, { 
+          ...options, 
+          model: fallbackModel,
+          max_tokens: reducedMaxTokens,
+          __fallbackAttempt: attemptCount + 1
+        });
+      }
+      
+      // If all fallbacks exhausted or model is already a fallback, throw error
       throw error;
     }
   }
@@ -240,7 +316,7 @@ export class OllamaManager {
    */
   async chat(
     messages: OllamaChatMessage[],
-    options: { model?: string; temperature?: number; stream?: boolean } = {}
+    options: { model?: string; temperature?: number; stream?: boolean; __fallbackAttempt?: number } = {}
   ): Promise<{
     content: string;
     model: string;
@@ -303,9 +379,29 @@ export class OllamaManager {
     } catch (error) {
       console.error(`Error in chat with model ${model}:`, error);
       
-      // Try fallback
-      if (model !== 'qwen2.5:3b') {
-        return this.chat(messages, { ...options, model: 'qwen2.5:3b' });
+      // Try fallback models
+      const fallbackChain: Record<string, string[]> = {
+        'qwen2.5:3b': ['mistral:7b', 'qwen2.5:7b'],
+        'mistral:7b': ['qwen2.5:7b'],
+        'qwen2.5:7b': ['mistral:7b'],
+        'codellama:7b': ['mistral:7b', 'qwen2.5:7b'],
+      };
+      
+      const fallbacks = fallbackChain[model] || ['mistral:7b', 'qwen2.5:7b'];
+      
+      if (fallbacks.length > 0) {
+        const fallbackModel = fallbacks[0];
+        const attemptCount = (options as any).__fallbackAttempt || 0;
+        if (attemptCount >= 2) {
+          throw error;
+        }
+        
+        console.log(`🔄 Trying fallback model for chat: ${fallbackModel}`);
+        return this.chat(messages, { 
+          ...options, 
+          model: fallbackModel,
+          __fallbackAttempt: attemptCount + 1
+        });
       }
       
       throw error;

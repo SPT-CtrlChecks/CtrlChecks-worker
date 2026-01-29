@@ -339,9 +339,62 @@ export class OllamaOrchestrator {
         });
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
+        const errorMessage = lastError.message.toLowerCase();
+        const isTimeout = errorMessage.includes('timeout') || errorMessage.includes('und_err');
+        
         if (attempt < maxRetries) {
-          console.warn(`⚠️  Attempt ${attempt} failed, retrying...`);
-          await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+          // Exponential backoff with longer delays for timeout errors
+          const baseDelay = isTimeout ? 5000 : 2000; // 5 seconds for timeouts, 2 seconds for other errors
+          const delay = baseDelay * Math.pow(2, attempt - 1); // Exponential backoff
+          console.warn(`⚠️  Attempt ${attempt} failed${isTimeout ? ' (timeout)' : ''}, retrying in ${delay}ms...`);
+          
+          // For timeout errors, try a different model on retry
+          if (isTimeout && attempt === 1) {
+            const fallbackChain: Record<string, string[]> = {
+              'qwen2.5:3b': ['mistral:7b', 'qwen2.5:7b'],
+              'mistral:7b': ['qwen2.5:7b'],
+              'qwen2.5:7b': ['mistral:7b'],
+              'codellama:7b': ['mistral:7b', 'qwen2.5:7b'],
+            };
+            
+            const fallbacks = fallbackChain[model] || ['mistral:7b', 'qwen2.5:7b'];
+            if (fallbacks.length > 0) {
+              const newModel = fallbacks[0];
+              console.log(`🔄 Switching to fallback model: ${newModel} due to timeout (was using ${model})`);
+              return this.executeWithRetry(newModel, type, input, {
+                ...options,
+                max_tokens: options?.max_tokens ? Math.floor(options.max_tokens * 0.7) : undefined
+              }, maxRetries - attempt);
+            }
+          }
+          
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          console.error(`❌ All ${maxRetries} attempts failed. Last error:`, lastError.message);
+          
+          // Final fallback: try a different model
+          if (isTimeout) {
+            const fallbackChain: Record<string, string[]> = {
+              'qwen2.5:3b': ['mistral:7b', 'qwen2.5:7b'],
+              'mistral:7b': ['qwen2.5:7b'],
+              'qwen2.5:7b': ['mistral:7b'],
+              'codellama:7b': ['mistral:7b', 'qwen2.5:7b'],
+            };
+            
+            const fallbacks = fallbackChain[model] || ['mistral:7b', 'qwen2.5:7b'];
+            if (fallbacks.length > 0) {
+              const newModel = fallbacks[0];
+              console.log(`🔄 Final fallback: trying model ${newModel} (was using ${model})`);
+              try {
+                return await this.executeWithRetry(newModel, type, input, {
+                  ...options,
+                  max_tokens: options?.max_tokens ? Math.floor(options.max_tokens * 0.5) : undefined
+                }, 2);
+              } catch (finalError) {
+                console.error(`❌ Fallback model ${newModel} also failed:`, finalError instanceof Error ? finalError.message : String(finalError));
+              }
+            }
+          }
         }
       }
     }
