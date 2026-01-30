@@ -32,6 +32,7 @@ import processRoute from './api/process';
 import executeNodeRoute from './api/execute-node';
 import aiGateway from './api/ai-gateway';
 import * as trainingStats from './api/training-stats';
+import getCredentialsRoute from './api/get-credentials';
 
 
 
@@ -147,6 +148,9 @@ app.post('/api/analyze-workflow-requirements', asyncHandler(analyzeWorkflowRequi
 // Debug Node Execution (for Debug Panel)
 app.post('/execute-node', asyncHandler(executeNodeRoute));
 app.post('/api/execute-node', asyncHandler(executeNodeRoute)); // Also support /api prefix
+
+// Get User Credentials
+app.get('/api/credentials', asyncHandler(getCredentialsRoute));
 
 // AI Gateway - Unified AI Services
 app.use('/api/ai', aiGateway);

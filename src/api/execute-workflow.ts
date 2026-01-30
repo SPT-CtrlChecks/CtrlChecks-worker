@@ -1031,7 +1031,37 @@ export async function executeNode(
       // LinkedIn API node
       const operation = getStringProperty(config, 'operation', 'post');
       const text = getStringProperty(config, 'text', '');
-      const accessToken = getStringProperty(config, 'accessToken', '') || process.env.LINKEDIN_ACCESS_TOKEN || '';
+      
+      // Try to get access token from config, then from stored credentials, then from env
+      let accessToken = getStringProperty(config, 'accessToken', '');
+      let accountType = getStringProperty(config, 'accountType', 'profile');
+      let organizationId = getStringProperty(config, 'organizationId', '');
+      
+      // If no access token in config, try to fetch from stored credentials
+      if (!accessToken && userId) {
+        try {
+          const { data: credsData, error: credsError } = await supabase
+            .from('user_credentials')
+            .select('credentials')
+            .eq('user_id', userId)
+            .eq('service', 'linkedin')
+            .single();
+          
+          if (!credsError && credsData?.credentials) {
+            const credentials = credsData.credentials as any;
+            accessToken = credentials.accessToken || '';
+            accountType = credentials.accountType || accountType;
+            organizationId = credentials.organizationId || organizationId;
+          }
+        } catch (error) {
+          console.warn('Failed to fetch LinkedIn credentials from database:', error);
+        }
+      }
+      
+      // Fallback to environment variable
+      if (!accessToken) {
+        accessToken = process.env.LINKEDIN_ACCESS_TOKEN || '';
+      }
 
       // Build context
       const context = {
@@ -1059,6 +1089,11 @@ export async function executeNode(
       }
 
       try {
+        // Determine author based on account type
+        const author = accountType === 'organization' && organizationId
+          ? organizationId
+          : `urn:li:person:${getStringProperty(config, 'personUrn', '')}`;
+        
         // LinkedIn API v2 endpoint
         const response = await fetch('https://api.linkedin.com/v2/ugcPosts', {
           method: 'POST',
@@ -1068,7 +1103,7 @@ export async function executeNode(
             'X-Restli-Protocol-Version': '2.0.0',
           },
           body: JSON.stringify({
-            author: `urn:li:person:${getStringProperty(config, 'personUrn', '')}`,
+            author,
             lifecycleState: 'PUBLISHED',
             specificContent: {
               'com.linkedin.ugc.ShareContent': {
@@ -1133,6 +1168,8 @@ export default async function executeWorkflowHandler(req: Request, res: Response
     return res.status(400).json({ error: 'workflowId is required' });
   }
 
+  console.log(`[execute-workflow] Attempting to execute workflow: ${workflowId}`);
+
   let executionId: string | undefined;
   let logs: ExecutionLog[] = [];
 
@@ -1145,25 +1182,56 @@ export default async function executeWorkflowHandler(req: Request, res: Response
       .single();
 
     if (workflowError || !workflow) {
-      console.error('Workflow fetch error:', workflowError);
+      console.error(`[execute-workflow] Workflow fetch error for ID ${workflowId}:`, workflowError);
       
-      // Check if it's a Supabase connection error
-      if (workflowError?.message?.includes('fetch failed') || 
-          workflowError?.message?.includes('ENOTFOUND') ||
-          workflowError?.message?.includes('your-project')) {
-        return res.status(500).json({ 
-          error: 'Database connection error',
+      // Check if it's a network/connection error vs not found
+      const isNetworkError = workflowError?.message?.includes('fetch failed') || 
+                            workflowError?.message?.includes('ECONNREFUSED') ||
+                            workflowError?.message?.includes('network') ||
+                            workflowError?.message?.includes('ENOTFOUND') ||
+                            workflowError?.message?.includes('your-project') ||
+                            workflowError?.code === 'ECONNREFUSED';
+      
+      if (isNetworkError) {
+        console.error(`[execute-workflow] Supabase connection error. Check SUPABASE_URL and network connectivity.`);
+        return res.status(503).json({ 
+          error: 'Database connection failed',
+          workflowId: workflowId,
           details: 'Unable to connect to Supabase. Please check your SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in the .env file.',
-          hint: 'Make sure your Supabase URL is not a placeholder (e.g., "your-project-id.supabase.co")'
+          hint: 'Make sure your Supabase URL is not a placeholder (e.g., "your-project-id.supabase.co")',
+          originalError: workflowError?.message
         });
       }
       
-      return res.status(404).json({ 
-        error: 'Workflow not found',
-        workflowId,
-        details: workflowError?.message || 'Workflow does not exist or you do not have access to it'
+      // Try to get more info about what workflows exist (only if not a network error)
+      try {
+        const { data: allWorkflows, error: listError } = await supabase
+          .from('workflows')
+          .select('id, name, created_at')
+          .limit(5)
+          .order('created_at', { ascending: false });
+        
+        if (!listError && allWorkflows) {
+          console.log(`[execute-workflow] Recent workflows in database:`, allWorkflows.map(w => ({ id: w.id, name: w.name })));
+        }
+      } catch (listErr) {
+        console.error(`[execute-workflow] Error listing workflows:`, listErr);
+      }
+      
+      // Check if it's a "not found" error (code PGRST116)
+      const isNotFound = workflowError?.code === 'PGRST116' || 
+                        workflowError?.message?.includes('No rows') ||
+                        (!workflow && !isNetworkError);
+      
+      return res.status(isNotFound ? 404 : 500).json({ 
+        error: isNotFound ? 'Workflow not found' : 'Database error',
+        workflowId: workflowId,
+        details: workflowError?.message || (isNotFound ? 'Workflow does not exist in database' : 'Database query failed'),
+        errorCode: workflowError?.code
       });
     }
+
+    console.log(`[execute-workflow] Workflow found: ${workflow.name || workflowId}`);
 
     const nodes = workflow.nodes as WorkflowNode[];
     const edges = workflow.edges as WorkflowEdge[];
