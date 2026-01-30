@@ -3,6 +3,11 @@
 
 import { randomUUID } from 'crypto';
 import { ollamaOrchestrator } from './ollama-orchestrator';
+import { requirementsExtractor } from './requirements-extractor';
+import { workflowValidator } from './workflow-validator';
+import { nodeEquivalenceMapper } from './node-equivalence-mapper';
+import { enhancedWorkflowAnalyzer } from './enhanced-workflow-analyzer';
+import { nodeLibrary } from '../nodes/node-library';
 import {
   WorkflowNode,
   WorkflowEdge,
@@ -196,14 +201,26 @@ export class AgenticWorkflowBuilder {
     
     // Step 4: Extract workflow requirements (URLs, APIs, credentials, etc.)
     onProgress?.({ step: 4, stepName: 'Requirements Extraction', progress: 40, details: { message: 'Extracting requirements...' } });
-    const requirements = await this.extractWorkflowRequirements(userPrompt, systemPrompt, constraints);
+    // Use RequirementsExtractor service if answers are provided, otherwise use legacy method
+    const answers = constraints?.answers;
+    const requirements = answers 
+      ? await requirementsExtractor.extractRequirements(userPrompt, systemPrompt, answers, constraints)
+      : await this.extractWorkflowRequirements(userPrompt, systemPrompt, constraints);
     
     // Step 5: Build workflow
     onProgress?.({ step: 5, stepName: 'Building', progress: 50, details: { message: 'Building workflow structure...' } });
     const structure = await this.generateStructure(requirements);
     
+    // Apply node preferences from user answers if available
+    const nodePreferences = constraints?.answers 
+      ? enhancedWorkflowAnalyzer.extractNodePreferences(constraints.answers)
+      : {};
+    
+    // Update structure with user's node preferences
+    const structureWithPreferences = this.applyNodePreferences(structure, nodePreferences, requirements);
+    
     onProgress?.({ step: 5, stepName: 'Building', progress: 60, details: { message: 'Selecting nodes...' } });
-    const nodes = await this.selectNodes(structure, requirements);
+    const nodes = await this.selectNodes(structureWithPreferences, requirements);
     
     onProgress?.({ step: 5, stepName: 'Building', progress: 70, details: { message: 'Configuring nodes...' } });
     const configuredNodes = await this.configureNodes(nodes, requirements, constraints);
@@ -211,45 +228,36 @@ export class AgenticWorkflowBuilder {
     onProgress?.({ step: 5, stepName: 'Building', progress: 80, details: { message: 'Creating connections...' } });
     const connections = await this.createConnections(configuredNodes, requirements);
     
-    // Step 6: Validate workflow and auto-fix errors
+    // Step 6: Validate workflow and auto-fix errors using WorkflowValidator service
     onProgress?.({ step: 6, stepName: 'Validating', progress: 90, details: { message: 'Validating workflow...' } });
-    const typeValidation = TypeValidator.validateWorkflow({
-      nodes: configuredNodes,
-      edges: connections,
-    });
-    
-    if (!typeValidation.isValid) {
-      console.warn('⚠️  Type validation warnings:', typeValidation.errors);
-    }
     
     let finalNodes = configuredNodes;
     let finalEdges = connections;
     
-    const validation = await this.validateWorkflow({
+    // Use WorkflowValidator service for comprehensive validation and auto-fix
+    const validation = await workflowValidator.validateAndFix({
       nodes: finalNodes,
       edges: finalEdges,
     });
     
-    // Auto-fix errors to ensure 100% working workflow
-    if (!validation.valid || validation.errors.length > 0) {
-      onProgress?.({ step: 6, stepName: 'Healing', progress: 92, details: { message: 'Fixing errors automatically...' } });
-      const fixed = await this.autoFixWorkflow(finalNodes, finalEdges, requirements, constraints);
-      finalNodes = fixed.nodes;
-      finalEdges = fixed.edges;
-      
-      // Re-validate after fixing
-      const revalidation = await this.validateWorkflow({
-        nodes: finalNodes,
-        edges: finalEdges,
-      });
-      
-      if (!revalidation.valid && revalidation.errors.length > 0) {
-        console.warn('⚠️  Some errors remain after auto-fix:', revalidation.errors);
-        // Try one more time with more aggressive fixes
-        const secondFix = await this.autoFixWorkflow(finalNodes, finalEdges, requirements, constraints, true);
-        finalNodes = secondFix.nodes;
-        finalEdges = secondFix.edges;
-      }
+    // Use fixed workflow if available
+    if (validation.fixedWorkflow) {
+      finalNodes = validation.fixedWorkflow.nodes;
+      finalEdges = validation.fixedWorkflow.edges;
+      onProgress?.({ step: 6, stepName: 'Healing', progress: 92, details: { 
+        message: `Fixed ${validation.fixesApplied.length} issues automatically`,
+        fixesApplied: validation.fixesApplied.length 
+      } });
+    }
+    
+    // Also run type validation for additional checks
+    const typeValidation = TypeValidator.validateWorkflow({
+      nodes: finalNodes,
+      edges: finalEdges,
+    });
+    
+    if (!typeValidation.isValid) {
+      console.warn('⚠️  Type validation warnings:', typeValidation.errors);
     }
     
     // Step 7: Generate outputs and documentation
@@ -627,6 +635,80 @@ Return JSON:
   }
 
   /**
+   * Apply node preferences to workflow structure
+   */
+  private applyNodePreferences(
+    structure: WorkflowGenerationStructure,
+    nodePreferences: Record<string, string>,
+    requirements: Requirements
+  ): WorkflowGenerationStructure {
+    const updatedStructure = { ...structure };
+    
+    // Apply preferences to trigger if scheduling preference exists
+    if (nodePreferences.scheduling) {
+      const preference = nodeEquivalenceMapper.getNodeOption('scheduling', nodePreferences.scheduling);
+      if (preference && this.nodeLibrary.has(preference.nodeType)) {
+        updatedStructure.trigger = preference.nodeType;
+      }
+    }
+    
+    // Apply preferences to steps (notifications, databases, file storage, etc.)
+    updatedStructure.steps = structure.steps.map(step => {
+      const stepLower = step.description?.toLowerCase() || '';
+      
+      // Check for notification preference
+      if (nodePreferences.notification && (
+        stepLower.includes('notify') || 
+        stepLower.includes('send') || 
+        stepLower.includes('alert') ||
+        stepLower.includes('message') ||
+        step.type === 'slack_message' ||
+        step.type === 'email' ||
+        step.type === 'discord_webhook' ||
+        step.type === 'twilio'
+      )) {
+        const preference = nodeEquivalenceMapper.getNodeOption('notification', nodePreferences.notification);
+        if (preference && this.nodeLibrary.has(preference.nodeType)) {
+          return { ...step, type: preference.nodeType };
+        }
+      }
+      
+      // Check for database preference
+      if (nodePreferences.database && (
+        stepLower.includes('store') || 
+        stepLower.includes('save') || 
+        stepLower.includes('database') ||
+        step.type === 'database_read' ||
+        step.type === 'database_write' ||
+        step.type === 'supabase'
+      )) {
+        const preference = nodeEquivalenceMapper.getNodeOption('database', nodePreferences.database);
+        if (preference && this.nodeLibrary.has(preference.nodeType)) {
+          return { ...step, type: preference.nodeType };
+        }
+      }
+      
+      // Check for file storage preference
+      if (nodePreferences.file_storage && (
+        stepLower.includes('file') || 
+        stepLower.includes('upload') || 
+        stepLower.includes('store file') ||
+        step.type === 'google_drive' ||
+        step.type === 'aws_s3'
+      )) {
+        const preference = nodeEquivalenceMapper.getNodeOption('file_storage', nodePreferences.file_storage);
+        if (preference && this.nodeLibrary.has(preference.nodeType)) {
+          return { ...step, type: preference.nodeType };
+        }
+      }
+      
+      return step;
+    });
+    
+    return updatedStructure;
+  }
+
+  /**
    * Infer node type from step description using node library
    */
   private inferStepType(step: string): string {
@@ -737,16 +819,21 @@ Return JSON:
     let xPosition = 100;
     const ySpacing = 150;
     
+    // Use NodeLibrary to get better node selection
+    const triggerType = structure.trigger || 'manual_trigger';
+    const triggerSchema = nodeLibrary.getSchema(triggerType);
+    const triggerLabel = triggerSchema?.label || this.getNodeLabel(triggerType);
+    const triggerCategory = triggerSchema?.category || 'triggers';
+    
     // Add trigger node with unique UUID
-    // Triggers use their type name as label (already short)
     const triggerNode: WorkflowNode = {
       id: randomUUID(),
-      type: structure.trigger || 'manual_trigger',
+      type: triggerType,
       position: { x: xPosition, y: 100 },
       data: {
-        type: structure.trigger || 'manual_trigger',
-        label: this.getNodeLabel(structure.trigger || 'manual_trigger'),
-        category: 'triggers',
+        type: triggerType,
+        label: triggerLabel,
+        category: triggerCategory,
         config: {},
       },
     };
@@ -755,8 +842,13 @@ Return JSON:
     
     // Add step nodes with unique UUIDs
     structure.steps.forEach((step: WorkflowStepDefinition, index: number) => {
+      // Use NodeLibrary to get node information
+      const stepSchema = nodeLibrary.getSchema(step.type);
+      const defaultLabel = stepSchema?.label || this.getNodeLabel(step.type);
+      const stepCategory = stepSchema?.category || this.getNodeCategory(step.type);
+      
       // Extract short label from description (max 3-4 words)
-      let shortLabel = this.getNodeLabel(step.type);
+      let shortLabel = defaultLabel;
       if (step.description) {
         // Clean description first
         let cleanDesc = step.description
@@ -802,7 +894,7 @@ Return JSON:
         data: {
           type: step.type,
           label: shortLabel,
-          category: this.getNodeCategory(step.type),
+          category: stepCategory,
           config: {},
         },
       };
@@ -899,6 +991,9 @@ Return JSON:
     requirements: Requirements,
     configValues: Record<string, any> = {}
   ): Promise<Record<string, unknown>> {
+    // Get node schema from NodeLibrary for better configuration
+    const nodeSchema = nodeLibrary.getSchema(node.type);
+    
     const config: Record<string, unknown> = {};
     
     // Extract values from configValues (user-provided credentials/URLs)
@@ -914,6 +1009,10 @@ Return JSON:
           return v;
         }
       }
+      // Try to get default from schema
+      if (nodeSchema?.configSchema?.optional?.[key]?.default !== undefined) {
+        return nodeSchema.configSchema.optional[key].default;
+      }
       return fallback;
     };
 
@@ -922,6 +1021,19 @@ Return JSON:
       const arr = requirements[type] || [];
       return arr[index] || undefined;
     };
+
+    // Apply common patterns from NodeLibrary if available
+    if (nodeSchema?.commonPatterns && nodeSchema.commonPatterns.length > 0) {
+      // Try to match a pattern based on requirements
+      const matchedPattern = nodeSchema.commonPatterns.find(pattern => {
+        // Simple matching logic - can be enhanced
+        return true; // For now, use first pattern
+      });
+      
+      if (matchedPattern) {
+        Object.assign(config, matchedPattern.config);
+      }
+    }
 
     // Use AI to intelligently configure nodes based on type and requirements
     try {
