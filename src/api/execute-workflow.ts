@@ -1146,7 +1146,23 @@ export default async function executeWorkflowHandler(req: Request, res: Response
 
     if (workflowError || !workflow) {
       console.error('Workflow fetch error:', workflowError);
-      return res.status(404).json({ error: 'Workflow not found' });
+      
+      // Check if it's a Supabase connection error
+      if (workflowError?.message?.includes('fetch failed') || 
+          workflowError?.message?.includes('ENOTFOUND') ||
+          workflowError?.message?.includes('your-project')) {
+        return res.status(500).json({ 
+          error: 'Database connection error',
+          details: 'Unable to connect to Supabase. Please check your SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in the .env file.',
+          hint: 'Make sure your Supabase URL is not a placeholder (e.g., "your-project-id.supabase.co")'
+        });
+      }
+      
+      return res.status(404).json({ 
+        error: 'Workflow not found',
+        workflowId,
+        details: workflowError?.message || 'Workflow does not exist or you do not have access to it'
+      });
     }
 
     const nodes = workflow.nodes as WorkflowNode[];

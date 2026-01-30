@@ -317,6 +317,7 @@ Return JSON:
             estimatedComplexity: workflow.estimatedComplexity,
             systemPrompt: workflow.systemPrompt,
             requirements: workflow.requirements,
+            requiredCredentials: workflow.requiredCredentials || [],
           }) + '\n');
 
           res.end();
@@ -343,6 +344,7 @@ Return JSON:
           estimatedComplexity: workflow.estimatedComplexity,
           systemPrompt: workflow.systemPrompt,
           requirements: workflow.requirements,
+          requiredCredentials: workflow.requiredCredentials || [],
         });
       }
     } catch (error) {
