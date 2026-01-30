@@ -144,11 +144,13 @@ class AgentExecutor {
 
         // Detect provider from model name
         const detectProvider = (model: string): 'openai' | 'claude' | 'gemini' | 'ollama' => {
+          // Check for Ollama production models first
+          if (model.includes('llama3.1') || model.includes('qwen2.5-coder') || model.includes('ollama')) return 'ollama';
           if (model.startsWith('gpt-') || model.includes('openai')) return 'openai';
           if (model.startsWith('claude-') || model.includes('anthropic')) return 'claude';
           if (model.startsWith('gemini-') || model.includes('gemini')) return 'gemini';
-          if (model.includes('ollama')) return 'ollama';
-          return 'openai';
+          // Default to Ollama for production
+          return 'ollama';
         };
 
         // Reason about next action
@@ -336,8 +338,8 @@ export default async function executeAgent(req: Request, res: Response) {
     const config: AgentConfig = agentConfig || workflow.agent_config || {
       goal: "Complete the task",
       maxIterations: 10,
-      reasoningModel: "gpt-4o",
-      actionModel: "gpt-4o",
+      reasoningModel: "llama3.1:8b",  // Use Ollama for reasoning
+      actionModel: "llama3.1:8b",      // Use Ollama for actions
       memoryEnabled: true,
       temperature: 0.3,
     };

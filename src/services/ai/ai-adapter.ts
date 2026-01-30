@@ -40,7 +40,7 @@ export class AIAdapter {
     options: TextGenerationOptions = {}
   ): Promise<string> {
     const result = await this.ollama.generate(prompt, {
-      model: options.model || 'qwen2.5:3b',
+      model: options.model || 'llama3.1:8b',
       system: options.system,
       temperature: options.temperature ?? 0.7,
       max_tokens: options.max_tokens,
@@ -66,7 +66,7 @@ export class AIAdapter {
       : prompt;
 
     const result = await this.ollama.generate(fullPrompt, {
-      model: 'codellama:7b',
+      model: 'qwen2.5-coder:7b',
       system: systemPrompt,
       temperature: options.temperature ?? 0.3,
       stream: false,
@@ -103,7 +103,7 @@ export class AIAdapter {
     }));
 
     const result = await this.ollama.chat(ollamaMessages, {
-      model: options.model || 'qwen2.5:3b',
+      model: options.model || 'llama3.1:8b',
       temperature: options.temperature ?? 0.7,
       stream: false,
     });
@@ -123,7 +123,7 @@ export class AIAdapter {
       : `Summarize the following text${options.maxLength ? ` in ${options.maxLength} words` : ''}:\n\n${text}`;
 
     const result = await this.ollama.generate(prompt, {
-      model: 'qwen2.5:3b',
+      model: 'llama3.1:8b',
       system: 'You are an expert at creating concise, accurate summaries.',
       temperature: 0.5,
       max_tokens: options.maxLength ? options.maxLength * 2 : 500,
@@ -146,7 +146,7 @@ export class AIAdapter {
       : `Translate the following text to ${targetLanguage}:\n\n${text}`;
 
     const result = await this.ollama.generate(prompt, {
-      model: 'qwen2.5:3b', // Good multilingual support
+      model: 'llama3.1:8b', // Good multilingual support
       system: 'You are an expert translator. Provide accurate translations.',
       temperature: 0.3,
       stream: false,
@@ -166,7 +166,7 @@ export class AIAdapter {
     const prompt = `Analyze the sentiment of the following text. Respond with JSON: {"sentiment": "positive|negative|neutral", "score": 0.0-1.0, "explanation": "brief explanation"}\n\nText: ${text}`;
 
     const result = await this.ollama.generate(prompt, {
-      model: 'qwen2.5:3b',
+      model: 'llama3.1:8b',
       system: 'You are a sentiment analysis expert. Always respond with valid JSON.',
       temperature: 0.3,
       stream: false,
@@ -247,7 +247,7 @@ export class AIAdapter {
     const prompt = `Extract the following information from the text below. Respond with JSON object containing only the extracted fields:\n\nFields to extract:\n${fieldsDescription}\n\nText:\n${text}`;
 
     const result = await this.ollama.generate(prompt, {
-      model: 'qwen2.5:3b',
+      model: 'llama3.1:8b',
       system: 'You are an expert at extracting structured information. Always respond with valid JSON only.',
       temperature: 0.3,
       stream: false,
@@ -275,7 +275,7 @@ export class AIAdapter {
     const prompt = `Answer the following question based on the provided context. If the answer cannot be found in the context, say "I don't know."\n\nContext:\n${context}\n\nQuestion: ${question}\n\nAnswer:`;
 
     const result = await this.ollama.generate(prompt, {
-      model: 'qwen2.5:3b',
+      model: 'llama3.1:8b',
       system: 'You are a helpful assistant that answers questions based on provided context.',
       temperature: 0.3,
       stream: false,

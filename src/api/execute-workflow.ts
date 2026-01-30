@@ -517,8 +517,9 @@ export async function executeNode(
       const userInput = (inputObj as any)?.userInput || (inputObj as any)?.input || inputObj;
       
       // Determine provider and model from chat_model connection or config
-      let provider: 'openai' | 'claude' | 'gemini' | 'ollama' = 'openai';
-      let model = 'gpt-4o';
+      // Default to Ollama for production (llama3.1:8b)
+      let provider: 'openai' | 'claude' | 'gemini' | 'ollama' = 'ollama';
+      let model = 'llama3.1:8b';
       let apiKey: string | undefined;
       
       if (chatModelConfig.provider) {
@@ -527,8 +528,13 @@ export async function executeNode(
         provider = LLMAdapter.detectProvider(chatModelConfig.model);
       }
       
-      model = chatModelConfig.model || getStringProperty(config, 'model', 'gpt-4o');
+      // Default to Ollama production model if not specified
+      model = chatModelConfig.model || getStringProperty(config, 'model', 'llama3.1:8b');
+      
+      // Only get API key if using external providers (not Ollama)
+      if (provider !== 'ollama') {
       apiKey = chatModelConfig.apiKey || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.GEMINI_API_KEY;
+      }
       
       // Build messages array
       const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [];
@@ -796,10 +802,24 @@ export async function executeNode(
         json: inputObj,
       };
 
+      // Security: Check if JavaScript execution is enabled
+      if (process.env.DISABLE_JAVASCRIPT_NODE === 'true') {
+        return {
+          ...inputObj,
+          _error: 'JavaScript node execution is disabled for security reasons',
+        };
+      }
+
       try {
         // Create a safe execution context
-        // Note: Using eval is not ideal for security, but needed for dynamic code execution
-        // In production, consider using vm2 or isolated-vm for better security
+        // WARNING: Using eval is a security risk. In production, consider:
+        // 1. Using vm2 or isolated-vm for sandboxing
+        // 2. Disabling JavaScript nodes entirely (set DISABLE_JAVASCRIPT_NODE=true)
+        // 3. Implementing code validation and sanitization
+        if (process.env.NODE_ENV === 'production') {
+          console.warn('[Security] JavaScript node execution in production - consider using vm2 or isolated-vm');
+        }
+        
         const wrappedCode = `
           (function() {
             const input = ${JSON.stringify(inputObj)};
@@ -1084,6 +1104,16 @@ export async function executeNode(
       }
     }
 
+    case 'form': {
+      // Form node - this will pause execution in the main handler
+      // Just return input for now, the handler will detect form nodes and pause
+      return {
+        ...inputObj,
+        _form_node: true,
+        _node_id: node.id,
+      };
+    }
+
     default: {
       // For unknown node types, return input as output
       console.warn(`Unknown node type: ${type}, returning input as output`);
@@ -1185,14 +1215,53 @@ export default async function executeWorkflowHandler(req: Request, res: Response
     const executionOrder = allNodes.filter(n => n.data.type !== 'error_trigger');
     const errorTriggerNodes = allNodes.filter(n => n.data.type === 'error_trigger');
 
+    // If resuming from form submission, find where we left off
+    let startFromIndex = 0;
+    if (providedExecutionId) {
+      const { data: execData } = await supabase
+        .from('executions')
+        .select('waiting_for_node_id, logs, input')
+        .eq('id', executionId)
+        .single();
+      
+      if (execData?.waiting_for_node_id) {
+        // Find the form node index and start from the next node
+        const formNodeIndex = executionOrder.findIndex(n => n.id === execData.waiting_for_node_id);
+        if (formNodeIndex >= 0) {
+          startFromIndex = formNodeIndex + 1;
+          console.log(`[Resume] Resuming from node index ${startFromIndex} (after form node ${execData.waiting_for_node_id})`);
+          
+          // Restore node outputs from logs if available
+          if (execData.logs && Array.isArray(execData.logs)) {
+            execData.logs.forEach((log: any) => {
+              if (log.output !== undefined && log.nodeId) {
+                nodeOutputs[log.nodeId] = log.output;
+              }
+            });
+          }
+          
+          // Set form node output to the form submission data (from execution input)
+          if (execData.input && formNodeIndex >= 0) {
+            const formNode = executionOrder[formNodeIndex];
+            nodeOutputs[formNode.id] = execData.input;
+            console.log(`[Resume] Set form node output from submission data`);
+          }
+        }
+      }
+    }
+
     console.log('Execution order:', executionOrder.map(n => n.data.label));
+    if (startFromIndex > 0) {
+      console.log(`[Resume] Skipping first ${startFromIndex} nodes, starting from: ${executionOrder[startFromIndex]?.data.label}`);
+    }
 
     let finalOutput: unknown = input;
     let hasError = false;
     let errorMessage = '';
 
-    // Execute nodes in order
-    for (const node of executionOrder) {
+    // Execute nodes in order (starting from resume point if applicable)
+    for (let i = startFromIndex; i < executionOrder.length; i++) {
+      const node = executionOrder[i];
       const log: ExecutionLog = {
         nodeId: node.id,
         nodeName: node.data.label,
@@ -1251,6 +1320,114 @@ export default async function executeWorkflowHandler(req: Request, res: Response
         }
 
         log.input = nodeInput;
+
+        // Handle form nodes - pause execution and wait for form submission
+        // Check BEFORE executing the node to avoid unnecessary work
+        if (node.data.type === 'form') {
+          console.log(`[Form Node] Detected form node: ${node.id}, pausing execution...`);
+          console.log(`[Form Node] Execution ID: ${executionId}, Workflow ID: ${workflowId}`);
+          
+          // Update execution status to "waiting" for form submission
+          if (executionId) {
+            const updateData = {
+              status: 'waiting',
+              trigger: 'form',
+              waiting_for_node_id: node.id,
+            };
+            
+            console.log(`[Form Node] Updating execution with:`, updateData);
+            
+            const { data: updatedExecution, error: updateError } = await supabase
+              .from('executions')
+              .update(updateData)
+              .eq('id', executionId)
+              .select()
+              .single();
+            
+            if (updateError) {
+              console.error('[Form Node] Failed to update execution status:', updateError);
+              console.error('[Form Node] Update data attempted:', updateData);
+              console.error('[Form Node] Execution ID:', executionId);
+              
+              // Check if it's a column/type error
+              const errorMessage = updateError.message || String(updateError);
+              const isColumnError = errorMessage.includes('column') || 
+                                   errorMessage.includes('does not exist') ||
+                                   errorMessage.includes('invalid input value');
+              
+              if (isColumnError) {
+                return res.status(500).json({
+                  error: 'Database migration required',
+                  message: 'The database schema needs to be updated for form triggers to work.',
+                  details: errorMessage,
+                  migrationHint: 'Please run the form_trigger_setup.sql migration in your Supabase SQL Editor. This adds the "waiting" status, "form" trigger, and "waiting_for_node_id" column.',
+                });
+              }
+              
+              return res.status(500).json({
+                error: 'Failed to pause workflow',
+                message: 'Could not set execution to waiting status',
+                details: errorMessage,
+                code: updateError.code,
+              });
+            } else {
+              console.log(`[Form Node] Execution ${executionId} successfully set to waiting for form node ${node.id}`);
+              console.log(`[Form Node] Updated execution:`, {
+                id: updatedExecution?.id,
+                status: updatedExecution?.status,
+                trigger: updatedExecution?.trigger,
+                waiting_for_node_id: updatedExecution?.waiting_for_node_id,
+              });
+            }
+          } else {
+            console.error('[Form Node] No execution ID available!');
+            return res.status(500).json({
+              error: 'Execution error',
+              message: 'No execution ID found. Cannot pause workflow.',
+            });
+          }
+          
+          // Return early - workflow is paused waiting for form submission
+          log.status = 'success'; // Use 'success' instead of 'waiting' to match type
+          log.finishedAt = new Date().toISOString();
+          logs.push(log);
+          
+          // Update execution with logs before returning
+          if (executionId) {
+            const { error: logError } = await supabase
+              .from('executions')
+              .update({ logs })
+              .eq('id', executionId);
+            
+            if (logError) {
+              console.error('[Form Node] Failed to update execution logs:', logError);
+            }
+          }
+          
+          // Generate form URL - use frontend URL format, not backend API URL
+          // The frontend will handle routing to the form page
+          const frontendUrl = process.env.FRONTEND_URL || process.env.VITE_FRONTEND_URL || process.env.PUBLIC_BASE_URL?.replace(':3001', ':8080') || (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:8080');
+          if (!frontendUrl && process.env.NODE_ENV === 'production') {
+            console.error('[Form Node] FRONTEND_URL environment variable is required in production');
+            return res.status(500).json({
+              error: 'Configuration error',
+              message: 'Frontend URL is not configured. Please set FRONTEND_URL environment variable.',
+            });
+          }
+          const formUrl = `${frontendUrl}/form/${workflowId}/${node.id}`;
+          if (process.env.NODE_ENV !== 'production') {
+          console.log(`[Form Node] Returning form URL: ${formUrl}`);
+          }
+          
+          return res.status(200).json({
+            success: true,
+            status: 'waiting',
+            executionId,
+            message: 'Workflow paused waiting for form submission',
+            formNodeId: node.id,
+            formUrl,
+          });
+        }
 
         // Execute node
         const output = await executeNode(

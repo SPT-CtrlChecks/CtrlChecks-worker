@@ -30,47 +30,22 @@ export interface OllamaChatMessage {
 
 /**
  * Model Capabilities Mapping
- * Based on your available models, optimized for AWS deployment
+ * Optimized for AWS g4dn.xlarge deployment (16GB GPU)
+ * Using only 2 best models for production
  */
 const MODEL_CAPABILITIES = {
-  // PRIMARY MODELS (Best 3 for production)
-  'qwen2.5:3b': {
-    size: '1.9GB',
-    capabilities: ['text-generation', 'chat', 'multilingual', 'reasoning', 'fast'],
-    priority: 1, // Primary - fastest, good quality
-    useCase: 'General purpose, chat, fast responses'
-  },
-  'codellama:7b': {
-    size: '3.8GB',
-    capabilities: ['code-generation', 'code-analysis', 'debugging', 'documentation'],
-    priority: 1, // Primary - best for code
-    useCase: 'Code generation, analysis, debugging'
-  },
-  'llava:latest': {
-    size: '4.7GB',
-    capabilities: ['image-analysis', 'vision', 'image-description'],
-    priority: 1, // Primary - only vision model
-    useCase: 'Image understanding tasks'
-  },
-  
-  // FALLBACK MODELS
-  'mistral:7b': {
-    size: '4.4GB',
-    capabilities: ['text-generation', 'summarization', 'chat'],
-    priority: 2,
-    useCase: 'Fallback for text generation'
-  },
+  // PRIMARY MODELS (Best 2 for production)
   'llama3.1:8b': {
     size: '4.9GB',
-    capabilities: ['text-generation', 'reasoning', 'chat'],
-    priority: 2,
-    useCase: 'Fallback for complex reasoning'
+    capabilities: ['text-generation', 'reasoning', 'chat', 'multilingual', 'general-purpose'],
+    priority: 1, // Primary - best general purpose
+    useCase: 'General purpose, chat, reasoning, multilingual tasks'
   },
-  'qwen2.5:7b': {
-    size: '4.7GB',
-    capabilities: ['text-generation', 'multilingual', 'chat'],
-    priority: 2,
-    useCase: 'Fallback for multilingual tasks'
+  'qwen2.5-coder:7b': {
+    size: '4.5GB',
+    capabilities: ['code-generation', 'code-analysis', 'debugging', 'documentation', 'programming'],
+    priority: 1, // Primary - best for code
+    useCase: 'Code generation, analysis, debugging, programming tasks'
   }
 };
 
@@ -127,7 +102,7 @@ export class OllamaManager {
       console.log(`📦 Loaded models: ${Array.from(this.loadedModels).join(', ')}`);
       
       // Ensure primary models are loaded
-      await this.ensureModelsLoaded(['qwen2.5:3b', 'codellama:7b', 'llava:latest']);
+      await this.ensureModelsLoaded(['llama3.1:8b', 'qwen2.5-coder:7b']);
     } catch (error) {
       console.error('❌ Failed to connect to Ollama:', error);
       throw new Error(`Ollama connection failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -171,15 +146,19 @@ export class OllamaManager {
    */
   selectBestModel(task: string, options?: { requireVision?: boolean; requireCode?: boolean }): string {
     if (options?.requireVision) {
-      return 'llava:latest';
+      // Vision not supported, fallback to general model
+      console.warn('Vision models not available, using general-purpose model');
+      return 'llama3.1:8b';
     }
     
-    if (options?.requireCode || task.toLowerCase().includes('code') || task.toLowerCase().includes('programming')) {
-      return 'codellama:7b';
+    if (options?.requireCode || task.toLowerCase().includes('code') || task.toLowerCase().includes('programming') || 
+        task.toLowerCase().includes('debug') || task.toLowerCase().includes('function') || 
+        task.toLowerCase().includes('script') || task.toLowerCase().includes('algorithm')) {
+      return 'qwen2.5-coder:7b';
     }
     
-    // Default to fastest general-purpose model
-    return 'qwen2.5:3b';
+    // Default to general-purpose model
+    return 'llama3.1:8b';
   }
 
   /**
@@ -272,16 +251,13 @@ export class OllamaManager {
         console.warn(`⏱️  Timeout error with model ${model}. This may indicate the model is slow or Ollama service is overloaded.`);
       }
       
-      // Try fallback models in order: mistral:7b -> qwen2.5:7b
-      // Don't fallback to the same model that failed
+      // Try fallback models - only 2 models available
       const fallbackChain: Record<string, string[]> = {
-        'qwen2.5:3b': ['mistral:7b', 'qwen2.5:7b'],
-        'mistral:7b': ['qwen2.5:7b'],
-        'qwen2.5:7b': ['mistral:7b'],
-        'codellama:7b': ['mistral:7b', 'qwen2.5:7b'],
+        'llama3.1:8b': ['qwen2.5-coder:7b'],
+        'qwen2.5-coder:7b': ['llama3.1:8b'],
       };
       
-      const fallbacks = fallbackChain[model] || ['mistral:7b', 'qwen2.5:7b'];
+      const fallbacks = fallbackChain[model] || ['llama3.1:8b'];
       
       if (fallbacks.length > 0) {
         const fallbackModel = fallbacks[0];
@@ -379,15 +355,13 @@ export class OllamaManager {
     } catch (error) {
       console.error(`Error in chat with model ${model}:`, error);
       
-      // Try fallback models
+      // Try fallback models - only 2 models available
       const fallbackChain: Record<string, string[]> = {
-        'qwen2.5:3b': ['mistral:7b', 'qwen2.5:7b'],
-        'mistral:7b': ['qwen2.5:7b'],
-        'qwen2.5:7b': ['mistral:7b'],
-        'codellama:7b': ['mistral:7b', 'qwen2.5:7b'],
+        'llama3.1:8b': ['qwen2.5-coder:7b'],
+        'qwen2.5-coder:7b': ['llama3.1:8b'],
       };
       
-      const fallbacks = fallbackChain[model] || ['mistral:7b', 'qwen2.5:7b'];
+      const fallbacks = fallbackChain[model] || ['llama3.1:8b'];
       
       if (fallbacks.length > 0) {
         const fallbackModel = fallbacks[0];

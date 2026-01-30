@@ -48,16 +48,16 @@ export class ModelManager {
   }
 
   /**
-   * Get recommended models for AWS deployment
-   * Based on your available models and AWS instance constraints
+   * Get recommended models for AWS deployment (g4dn.xlarge - 16GB GPU)
+   * Optimized for production with 2 best models
    */
   getRecommendedModels(): string[] {
-    // Best 3 models for production (fits in most AWS GPU instances)
+    // Best 2 models for production (fits perfectly in g4dn.xlarge)
     return [
-      'qwen2.5:3b',      // 1.9GB - Fast, general purpose
-      'codellama:7b',    // 3.8GB - Code generation
+      'llama3.1:8b',        // 4.9GB - Best general purpose, excellent reasoning, multilingual
+      'qwen2.5-coder:7b',   // ~4.5GB - Best for code generation and analysis (Qwen2.5-Coder)
     ];
-    // Total: ~10.4GB - Fits in g4dn.xlarge (16GB GPU) or larger
+    // Total: ~9.4GB - Fits comfortably in g4dn.xlarge (16GB GPU) with room for inference
   }
 
   /**
@@ -65,14 +65,11 @@ export class ModelManager {
    */
   getFallbackModels(primaryModel: string): string[] {
     const fallbackMap: Record<string, string[]> = {
-      'qwen2.5:3b': ['mistral:7b', 'llama3.1:8b'],
-      'codellama:7b': ['qwen2.5:3b', 'mistral:7b'],
-      'llava:latest': ['qwen2.5:3b'], // No vision fallback, use text description
-      'mistral:7b': ['qwen2.5:3b', 'llama3.1:8b'],
-      'llama3.1:8b': ['qwen2.5:3b', 'mistral:7b'],
+      'llama3.1:8b': ['qwen2.5-coder:7b'],      // Fallback to code model
+      'qwen2.5-coder:7b': ['llama3.1:8b'],      // Fallback to general model
     };
 
-    return fallbackMap[primaryModel] || ['qwen2.5:3b'];
+    return fallbackMap[primaryModel] || ['llama3.1:8b'];
   }
 
   /**
@@ -101,12 +98,8 @@ export class ModelManager {
    */
   private getModelSize(modelName: string): string {
     const sizes: Record<string, string> = {
-      'qwen2.5:3b': '1.9GB',
-      'codellama:7b': '3.8GB',
-      'llava:latest': '4.7GB',
-      'mistral:7b': '4.4GB',
       'llama3.1:8b': '4.9GB',
-      'qwen2.5:7b': '4.7GB',
+      'qwen2.5-coder:7b': '4.5GB',
     };
     return sizes[modelName] || 'Unknown';
   }
@@ -116,11 +109,8 @@ export class ModelManager {
    */
   private getModelCapabilities(modelName: string): string[] {
     const capabilities: Record<string, string[]> = {
-      'qwen2.5:3b': ['text-generation', 'chat', 'multilingual', 'reasoning'],
-      'codellama:7b': ['code-generation', 'code-analysis', 'debugging'],
-      'mistral:7b': ['text-generation', 'summarization', 'chat'],
-      'llama3.1:8b': ['text-generation', 'reasoning', 'chat'],
-      'qwen2.5:7b': ['text-generation', 'multilingual', 'chat'],
+      'llama3.1:8b': ['text-generation', 'reasoning', 'chat', 'multilingual', 'general-purpose'],
+      'qwen2.5-coder:7b': ['code-generation', 'code-analysis', 'debugging', 'programming', 'documentation'],
     };
     return capabilities[modelName] || [];
   }

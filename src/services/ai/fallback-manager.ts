@@ -56,15 +56,15 @@ export class FallbackManager {
    */
   getFallbackStrategy(taskType: string): string[] {
     const strategies: Record<string, string[]> = {
-      'text-generation': ['qwen2.5:3b', 'mistral:7b', 'llama3.1:8b'],
-      'code-generation': ['codellama:7b', 'qwen2.5:3b'],
-      'image-analysis': ['llava:latest', 'qwen2.5:3b'], // Fallback to text description
-      'chat': ['qwen2.5:3b', 'mistral:7b'],
-      'summarization': ['qwen2.5:3b', 'mistral:7b'],
-      'translation': ['qwen2.5:3b', 'qwen2.5:7b'],
+      'text-generation': ['llama3.1:8b', 'qwen2.5-coder:7b'],
+      'code-generation': ['qwen2.5-coder:7b', 'llama3.1:8b'],
+      'image-analysis': ['llama3.1:8b'], // Vision not supported, fallback to general model
+      'chat': ['llama3.1:8b', 'qwen2.5-coder:7b'],
+      'summarization': ['llama3.1:8b'],
+      'translation': ['llama3.1:8b'],
     };
 
-    return strategies[taskType] || ['qwen2.5:3b'];
+    return strategies[taskType] || ['llama3.1:8b'];
   }
 }
 

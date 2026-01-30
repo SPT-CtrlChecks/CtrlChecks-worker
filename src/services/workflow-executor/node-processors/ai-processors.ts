@@ -43,13 +43,13 @@ export class TextAnalysisProcessor {
 
       const cacheKey = performanceOptimizer.generateCacheKey(prompt, {
         analysisType,
-        model: config.model || 'qwen2.5:3b',
+        model: config.model || 'llama3.1:8b',
       });
 
       const result = await performanceOptimizer.getCachedResponse(
         cacheKey,
         () => aiAdapter.textGeneration(prompt, {
-          model: config.model || 'qwen2.5:3b',
+          model: config.model || 'llama3.1:8b',
           system: systemPrompt,
           temperature: config.temperature ?? 0.7,
           max_tokens: config.maxTokens,
@@ -57,16 +57,16 @@ export class TextAnalysisProcessor {
       );
 
       const duration = Date.now() - startTime;
-      metricsTracker.trackRequest(config.model || 'qwen2.5:3b', true, duration);
+      metricsTracker.trackRequest(config.model || 'llama3.1:8b', true, duration);
 
       return {
         analysis: result,
         analysisType,
-        model: config.model || 'qwen2.5:3b',
+        model: config.model || 'llama3.1:8b',
       };
     } catch (error) {
       const duration = Date.now() - startTime;
-      metricsTracker.trackRequest(config.model || 'qwen2.5:3b', false, duration, 'text-analysis-error');
+      metricsTracker.trackRequest(config.model || 'llama3.1:8b', false, duration, 'text-analysis-error');
       throw error;
     }
   }
@@ -93,17 +93,17 @@ export class CodeGeneratorProcessor {
       });
 
       const duration = Date.now() - startTime;
-      metricsTracker.trackRequest('codellama:7b', true, duration);
+      metricsTracker.trackRequest('qwen2.5-coder:7b', true, duration);
 
       return {
         generatedCode: code,
         language: language || config.language,
         framework: framework || config.framework,
-        model: 'codellama:7b',
+        model: 'qwen2.5-coder:7b',
       };
     } catch (error) {
       const duration = Date.now() - startTime;
-      metricsTracker.trackRequest('codellama:7b', false, duration, 'code-generation-error');
+      metricsTracker.trackRequest('qwen2.5-coder:7b', false, duration, 'code-generation-error');
       throw error;
     }
   }
@@ -111,7 +111,7 @@ export class CodeGeneratorProcessor {
 
 /**
  * Image Understanding Processor
- * Analyzes images using LLaVA
+ * Image analysis (removed - multimodal not supported)
  */
 export class ImageUnderstandingProcessor {
   async process(input: AIProcessorInput, config: AIProcessorConfig): Promise<any> {
@@ -141,12 +141,12 @@ export class ChatProcessor {
       ];
 
       const response = await aiAdapter.chat(messages, {
-        model: config.model || 'qwen2.5:3b',
+        model: config.model || 'llama3.1:8b',
         temperature: config.temperature ?? 0.7,
       });
 
       const duration = Date.now() - startTime;
-      metricsTracker.trackRequest(config.model || 'qwen2.5:3b', true, duration);
+      metricsTracker.trackRequest(config.model || 'llama3.1:8b', true, duration);
 
       return {
         response,
@@ -154,11 +154,11 @@ export class ChatProcessor {
           ...messages,
           { role: 'assistant' as const, content: response },
         ],
-        model: config.model || 'qwen2.5:3b',
+        model: config.model || 'llama3.1:8b',
       };
     } catch (error) {
       const duration = Date.now() - startTime;
-      metricsTracker.trackRequest(config.model || 'qwen2.5:3b', false, duration, 'chat-error');
+      metricsTracker.trackRequest(config.model || 'llama3.1:8b', false, duration, 'chat-error');
       throw error;
     }
   }
@@ -185,7 +185,7 @@ export class DocumentAnalysisProcessor {
       const prompt = `Analyze this document:\n\n${documentText}\n\n${focusPrompt}\n\nProvide a comprehensive analysis.`;
 
       const analysis = await aiAdapter.textGeneration(prompt, {
-        model: config.model || 'qwen2.5:3b',
+        model: config.model || 'llama3.1:8b',
         system: 'You are an expert document analyst. Provide detailed, structured analysis.',
         temperature: config.temperature ?? 0.5,
         max_tokens: config.maxTokens || 2000,
@@ -197,17 +197,17 @@ export class DocumentAnalysisProcessor {
       });
 
       const duration = Date.now() - startTime;
-      metricsTracker.trackRequest(config.model || 'qwen2.5:3b', true, duration);
+      metricsTracker.trackRequest(config.model || 'llama3.1:8b', true, duration);
 
       return {
         documentAnalysis: analysis,
         summary,
         focusAreas,
-        model: config.model || 'qwen2.5:3b',
+        model: config.model || 'llama3.1:8b',
       };
     } catch (error) {
       const duration = Date.now() - startTime;
-      metricsTracker.trackRequest(config.model || 'qwen2.5:3b', false, duration, 'document-analysis-error');
+      metricsTracker.trackRequest(config.model || 'llama3.1:8b', false, duration, 'document-analysis-error');
       throw error;
     }
   }
@@ -233,17 +233,17 @@ export class SummarizationProcessor {
       });
 
       const duration = Date.now() - startTime;
-      metricsTracker.trackRequest('qwen2.5:3b', true, duration);
+      metricsTracker.trackRequest('llama3.1:8b', true, duration);
 
       return {
         summary,
         originalLength: text.length,
         summaryLength: summary.length,
-        model: 'qwen2.5:3b',
+        model: 'llama3.1:8b',
       };
     } catch (error) {
       const duration = Date.now() - startTime;
-      metricsTracker.trackRequest('qwen2.5:3b', false, duration, 'summarization-error');
+      metricsTracker.trackRequest('llama3.1:8b', false, duration, 'summarization-error');
       throw error;
     }
   }
@@ -270,18 +270,18 @@ export class TranslationProcessor {
       );
 
       const duration = Date.now() - startTime;
-      metricsTracker.trackRequest('qwen2.5:3b', true, duration);
+      metricsTracker.trackRequest('llama3.1:8b', true, duration);
 
       return {
         translation,
         sourceLanguage: sourceLanguage || 'auto',
         targetLanguage,
         originalText: text,
-        model: 'qwen2.5:3b',
+        model: 'llama3.1:8b',
       };
     } catch (error) {
       const duration = Date.now() - startTime;
-      metricsTracker.trackRequest('qwen2.5:3b', false, duration, 'translation-error');
+      metricsTracker.trackRequest('llama3.1:8b', false, duration, 'translation-error');
       throw error;
     }
   }
@@ -304,16 +304,16 @@ export class SentimentAnalysisProcessor {
       const sentiment = await aiAdapter.sentimentAnalysis(text);
 
       const duration = Date.now() - startTime;
-      metricsTracker.trackRequest('qwen2.5:3b', true, duration);
+      metricsTracker.trackRequest('llama3.1:8b', true, duration);
 
       return {
         ...sentiment,
         text,
-        model: 'qwen2.5:3b',
+        model: 'llama3.1:8b',
       };
     } catch (error) {
       const duration = Date.now() - startTime;
-      metricsTracker.trackRequest('qwen2.5:3b', false, duration, 'sentiment-analysis-error');
+      metricsTracker.trackRequest('llama3.1:8b', false, duration, 'sentiment-analysis-error');
       throw error;
     }
   }
@@ -336,18 +336,18 @@ export class SemanticSearchProcessor {
       const results = await aiAdapter.semanticSearch(query, documents, topK);
 
       const duration = Date.now() - startTime;
-      metricsTracker.trackRequest('qwen2.5:3b', true, duration);
+      metricsTracker.trackRequest('llama3.1:8b', true, duration);
 
       return {
         results,
         query,
         totalDocuments: documents.length,
         topK,
-        model: 'qwen2.5:3b',
+        model: 'llama3.1:8b',
       };
     } catch (error) {
       const duration = Date.now() - startTime;
-      metricsTracker.trackRequest('qwen2.5:3b', false, duration, 'semantic-search-error');
+      metricsTracker.trackRequest('llama3.1:8b', false, duration, 'semantic-search-error');
       throw error;
     }
   }

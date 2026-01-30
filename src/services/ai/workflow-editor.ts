@@ -120,7 +120,7 @@ export class AIWorkflowEditor {
     try {
       const result = await ollamaOrchestrator.processRequest('code-assistance', {
         prompt: `Provide code assistance for ${language} in this context: ${JSON.stringify(context, null, 2)}`,
-        model: 'codellama:7b',
+        model: 'qwen2.5-coder:7b',
         temperature: 0.2,
       });
       

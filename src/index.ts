@@ -117,7 +117,7 @@ app.put('/api/admin-templates/:id', asyncHandler(adminTemplatesRoute));
 app.delete('/api/admin-templates/:id', asyncHandler(adminTemplatesRoute));
 app.post('/api/copy-template', asyncHandler(copyTemplateRoute));
 
-// Form Trigger Routes
+// Form Trigger Routes - More specific route first
 app.get('/api/form-trigger/:workflowId/:nodeId', asyncHandler(formTriggerRoute));
 app.post('/api/form-trigger/:workflowId/:nodeId/submit', asyncHandler(formTriggerRoute));
 

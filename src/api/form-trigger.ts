@@ -302,6 +302,23 @@ export async function submitForm(req: Request, res: Response) {
     };
 
     // Find waiting execution for this form node
+    // First, let's check what executions exist for debugging
+    const { data: allExecutions, error: allExecError } = await supabase
+      .from("executions")
+      .select("*")
+      .eq("workflow_id", workflowId)
+      .order("started_at", { ascending: false })
+      .limit(5);
+    
+    console.log(`[Form Submit] Looking for waiting execution - workflowId: ${workflowId}, nodeId: ${nodeId}`);
+    console.log(`[Form Submit] Recent executions for this workflow:`, allExecutions?.map(e => ({
+      id: e.id,
+      status: e.status,
+      trigger: e.trigger,
+      waiting_for_node_id: e.waiting_for_node_id,
+      started_at: e.started_at
+    })));
+
     const { data: waitingExecution, error: waitError } = await supabase
       .from("executions")
       .select("*")
@@ -315,6 +332,23 @@ export async function submitForm(req: Request, res: Response) {
 
     if (waitError || !waitingExecution) {
       console.error("No waiting execution found for form node:", nodeId, waitError);
+      console.error("Searched for:", {
+        workflow_id: workflowId,
+        status: "waiting",
+        trigger: "form",
+        waiting_for_node_id: nodeId
+      });
+      
+      // Try to find any waiting execution for this workflow (for debugging)
+      const { data: anyWaiting } = await supabase
+        .from("executions")
+        .select("*")
+        .eq("workflow_id", workflowId)
+        .eq("status", "waiting")
+        .limit(1);
+      
+      console.log("Any waiting executions found:", anyWaiting);
+      
       return res.status(400).json({ 
         error: "No active form", 
         message: "This form is not currently waiting for a submission. Please activate the workflow first." 
@@ -374,21 +408,46 @@ export async function submitForm(req: Request, res: Response) {
       });
     }
 
-    // Resume workflow execution asynchronously
-    const executeUrl = `${config.publicBaseUrl}/api/execute-workflow`;
+    // Resume workflow execution asynchronously (don't wait for it)
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[Form Submit] Resuming workflow execution ${waitingExecution.id}...`);
+    }
+    
+    // Get execute URL - require PUBLIC_BASE_URL in production
+    let executeUrl: string;
+    if (config.publicBaseUrl) {
+      executeUrl = `${config.publicBaseUrl}/api/execute-workflow`;
+    } else if (process.env.NODE_ENV === 'production') {
+      console.error('[Form Submit] PUBLIC_BASE_URL is required in production');
+      return res.status(500).json({
+        error: 'Configuration error',
+        message: 'PUBLIC_BASE_URL environment variable is required in production.',
+      });
+    } else {
+      executeUrl = 'http://localhost:3001/api/execute-workflow';
+    }
     fetch(executeUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${config.supabaseKey}`,
       },
       body: JSON.stringify({
         workflowId,
         executionId: waitingExecution.id,
         input: executionInput,
       }),
-    }).catch((err) => {
-      console.error("Failed to resume workflow execution:", err);
+    })
+    .then(async (response) => {
+      if (response.ok) {
+        const result = await response.json();
+        console.log(`[Form Submit] Workflow resumed successfully:`, result);
+      } else {
+        const error = await response.text();
+        console.error(`[Form Submit] Workflow resume failed (${response.status}):`, error);
+      }
+    })
+    .catch((err) => {
+      console.error("[Form Submit] Failed to resume workflow execution:", err);
     });
 
     // Return success response
@@ -417,12 +476,29 @@ export default async function formTriggerHandler(req: Request, res: Response) {
     }
 
     const { workflowId, nodeId } = req.params;
-    const isSubmit = req.originalUrl.endsWith('/submit') || req.path.endsWith('/submit');
+    
+    // Check if this is a submit request - check multiple ways to be sure
+    const originalUrl = req.originalUrl || '';
+    const path = req.path || '';
+    const url = req.url || '';
+    const isSubmit = originalUrl.endsWith('/submit') || 
+                     path.endsWith('/submit') || 
+                     url.endsWith('/submit') ||
+                     originalUrl.includes('/submit') ||
+                     path.includes('/submit');
+
+    console.log(`[Form Trigger] ${req.method} ${originalUrl} - workflowId: ${workflowId}, nodeId: ${nodeId}, isSubmit: ${isSubmit}`);
 
     if (req.method === 'GET') {
       return getFormConfig(req, res);
-    } else if (req.method === 'POST' && isSubmit) {
-      return submitForm(req, res);
+    } else if (req.method === 'POST') {
+      // For POST, check if it's a submit request or just a regular form trigger
+      if (isSubmit) {
+        return submitForm(req, res);
+      } else {
+        // POST without /submit - treat as submit for backwards compatibility
+        return submitForm(req, res);
+      }
     } else {
       return res.status(405).json({ error: "Method not allowed", message: "This endpoint only supports GET and POST requests." });
     }

@@ -1,9 +1,9 @@
 // Analyze Workflow Requirements Route
 // Migrated from Supabase Edge Function
+// Uses Ollama models for analysis
 
 import { Request, Response } from 'express';
-import { LLMAdapter } from '../shared/llm-adapter';
-import { config } from '../core/config';
+import { ollamaOrchestrator } from '../services/ai/ollama-orchestrator';
 
 export default async function analyzeWorkflowRequirements(req: Request, res: Response) {
   try {
@@ -11,11 +11,6 @@ export default async function analyzeWorkflowRequirements(req: Request, res: Res
 
     if (!prompt) {
       return res.status(400).json({ error: 'Prompt is required' });
-    }
-
-    const apiKey = config.geminiApiKey;
-    if (!apiKey) {
-      return res.status(500).json({ error: 'GEMINI_API_KEY is not configured' });
     }
 
     const systemPrompt = `
@@ -49,21 +44,20 @@ export default async function analyzeWorkflowRequirements(req: Request, res: Res
       Respond with VALID JSON only.
     `;
 
-    const llm = new LLMAdapter();
-    console.log("Attempting analysis with gemini-2.5-flash");
-    const response = await llm.chat(
-      'gemini',
-      [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: prompt }
-      ],
-      { apiKey, model: 'gemini-2.5-flash' }
-    );
+    // Use Ollama for workflow requirements analysis
+    console.log("Analyzing workflow requirements with Ollama (llama3.1:8b)");
+    const response = await ollamaOrchestrator.processRequest('workflow-analysis', {
+      prompt: `${systemPrompt}\n\nUser Request: ${prompt}`,
+      temperature: 0.3,
+    });
+    
+    // Convert response to expected format
+    const responseContent = typeof response === 'string' ? response : JSON.stringify(response);
 
     let result;
     try {
       // Extract JSON from potential code blocks
-      let jsonText = response.content.trim();
+      let jsonText = responseContent.trim();
       if (jsonText.includes('```json')) {
         jsonText = jsonText.split('```json')[1].split('```')[0].trim();
       } else if (jsonText.includes('```')) {
@@ -72,7 +66,7 @@ export default async function analyzeWorkflowRequirements(req: Request, res: Res
 
       result = JSON.parse(jsonText);
     } catch (e) {
-      console.error("Failed to parse JSON", response.content);
+      console.error("Failed to parse JSON", responseContent);
       result = { requirements: [] }; // Fallback
     }
 

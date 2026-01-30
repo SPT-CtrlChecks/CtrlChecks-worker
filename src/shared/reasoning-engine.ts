@@ -52,9 +52,9 @@ export class ReasoningEngine {
   async reason(
     context: ReasoningContext,
     options: LLMOptions & { provider?: 'openai' | 'claude' | 'gemini' | 'ollama' } = { 
-      model: 'gpt-4o', 
+      model: 'llama3.1:8b', 
       temperature: 0.3,
-      provider: 'openai'
+      provider: 'ollama'
     }
   ): Promise<ReasoningResult> {
     const reasoningSteps: ReasoningStep[] = [];
@@ -119,9 +119,9 @@ Be precise, logical, and explain your reasoning clearly.`,
     availableActions: Action[],
     currentState?: any,
     options: LLMOptions & { provider?: 'openai' | 'claude' | 'gemini' | 'ollama' } = { 
-      model: 'gpt-4o', 
+      model: 'llama3.1:8b', 
       temperature: 0.3,
-      provider: 'openai'
+      provider: 'ollama'
     }
   ): Promise<Action[]> {
     const actionsList = availableActions
@@ -312,9 +312,9 @@ Think step by step. Return your reasoning in a structured format:
     goal: string,
     currentState: any,
     options: LLMOptions & { provider?: 'openai' | 'claude' | 'gemini' | 'ollama' } = { 
-      model: 'gpt-4o', 
+      model: 'llama3.1:8b', 
       temperature: 0.1,
-      provider: 'openai'
+      provider: 'ollama'
     }
   ): Promise<boolean> {
     const prompt = `Goal: ${goal}

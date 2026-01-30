@@ -43,18 +43,18 @@ export class OllamaOrchestrator {
   private modelRegistry: Map<string, ModelRegistry> = new Map();
   private specializedModels: SpecializedModels = {
     // Website Chatbot
-    'chichu-chat': ['qwen2.5:3b', 'qwen2.5:7b', 'mistral:7b'],
+    'chichu-chat': ['llama3.1:8b'],
     
     // Text Processing
-    'text-analysis': ['qwen2.5:3b', 'mistral:7b'],
+    'text-analysis': ['llama3.1:8b'],
     
     // Code/Editing
-    'code-generation': ['codellama:7b'],
-    'text-editing': ['qwen2.5:3b', 'gemma2:9b'],
+    'code-generation': ['qwen2.5-coder:7b'],
+    'text-editing': ['llama3.1:8b'],
     
     // Workflow Generation
-    'workflow-creation': ['qwen2.5:3b', 'qwen2.5:7b'],
-    'reasoning': ['qwen2.5:7b', 'mistral:7b']
+    'workflow-creation': ['llama3.1:8b'],
+    'reasoning': ['llama3.1:8b']
   };
   
   private cache: Map<string, { result: any; timestamp: number }> = new Map();
@@ -65,12 +65,10 @@ export class OllamaOrchestrator {
   }
 
   private initializeModelRegistry() {
-    // Initialize registry with known models
+    // Initialize registry with production models (AWS g4dn.xlarge)
     const models = [
-      { name: 'qwen2.5:3b', capabilities: ['text', 'chat', 'fast'], size: '1.9GB' },
-      { name: 'qwen2.5:7b', capabilities: ['text', 'chat', 'reasoning'], size: '4.7GB' },
-      { name: 'codellama:7b', capabilities: ['code'], size: '3.8GB' },
-      { name: 'mistral:7b', capabilities: ['text', 'chat'], size: '4.4GB' },
+      { name: 'llama3.1:8b', capabilities: ['text', 'chat', 'reasoning', 'multilingual', 'general'], size: '4.9GB' },
+      { name: 'qwen2.5-coder:7b', capabilities: ['code', 'programming', 'debugging', 'analysis'], size: '4.5GB' },
     ];
 
     models.forEach(model => {
@@ -133,8 +131,8 @@ export class OllamaOrchestrator {
     console.log('🔥 Warming up models...');
     
     const warmupPrompts = [
-      { model: 'qwen2.5:3b', prompt: 'Hello' },
-      { model: 'codellama:7b', prompt: '// Hello' },
+      { model: 'llama3.1:8b', prompt: 'Hello' },
+      { model: 'qwen2.5-coder:7b', prompt: '// Hello' },
     ];
 
     for (const { model, prompt } of warmupPrompts) {
@@ -244,17 +242,19 @@ export class OllamaOrchestrator {
   private selectOptimalModel(type: AIRequestType, input: any): string {
     // Check for specialized models
     if (type === 'image-understanding' || type === 'image-comparison') {
-      return 'llava:latest';
+      // Vision models not supported, fallback to general model
+      console.warn('Vision models not available, using general-purpose model');
+      return 'llama3.1:8b';
     }
     
     if (type === 'code-generation' || type === 'code-assistance') {
-      return 'codellama:7b';
+      return 'qwen2.5-coder:7b';
     }
     
     if (type === 'audio-transcription') {
       // Whisper is not a standard Ollama model - use text models as fallback
       // Audio transcription should be handled by specialized services
-      return 'qwen2.5:3b'; // Fallback to text model
+      return 'llama3.1:8b'; // Fallback to general model
     }
     
     // Get specialized models for this type
@@ -278,8 +278,8 @@ export class OllamaOrchestrator {
       return bestModel;
     }
     
-    // Default to fastest general model
-    return 'qwen2.5:3b';
+    // Default to general-purpose model
+    return 'llama3.1:8b';
   }
 
   private preprocessInput(type: AIRequestType, input: any): any {
@@ -351,13 +351,11 @@ export class OllamaOrchestrator {
           // For timeout errors, try a different model on retry
           if (isTimeout && attempt === 1) {
             const fallbackChain: Record<string, string[]> = {
-              'qwen2.5:3b': ['mistral:7b', 'qwen2.5:7b'],
-              'mistral:7b': ['qwen2.5:7b'],
-              'qwen2.5:7b': ['mistral:7b'],
-              'codellama:7b': ['mistral:7b', 'qwen2.5:7b'],
+              'llama3.1:8b': ['qwen2.5-coder:7b'],
+              'qwen2.5-coder:7b': ['llama3.1:8b'],
             };
             
-            const fallbacks = fallbackChain[model] || ['mistral:7b', 'qwen2.5:7b'];
+            const fallbacks = fallbackChain[model] || ['llama3.1:8b'];
             if (fallbacks.length > 0) {
               const newModel = fallbacks[0];
               console.log(`🔄 Switching to fallback model: ${newModel} due to timeout (was using ${model})`);
@@ -375,13 +373,11 @@ export class OllamaOrchestrator {
           // Final fallback: try a different model
           if (isTimeout) {
             const fallbackChain: Record<string, string[]> = {
-              'qwen2.5:3b': ['mistral:7b', 'qwen2.5:7b'],
-              'mistral:7b': ['qwen2.5:7b'],
-              'qwen2.5:7b': ['mistral:7b'],
-              'codellama:7b': ['mistral:7b', 'qwen2.5:7b'],
+              'llama3.1:8b': ['qwen2.5-coder:7b'],
+              'qwen2.5-coder:7b': ['llama3.1:8b'],
             };
             
-            const fallbacks = fallbackChain[model] || ['mistral:7b', 'qwen2.5:7b'];
+            const fallbacks = fallbackChain[model] || ['llama3.1:8b'];
             if (fallbacks.length > 0) {
               const newModel = fallbacks[0];
               console.log(`🔄 Final fallback: trying model ${newModel} (was using ${model})`);
@@ -482,10 +478,10 @@ Provide suggestions, corrections, and optimizations.`;
   private getFallbackModel(type: AIRequestType): string | null {
     // Return a fallback model for the type
     if (type === 'code-generation' || type === 'code-assistance') {
-      return 'qwen2.5:3b'; // Fallback to general model
+      return 'qwen2.5-coder:7b'; // Code model
     }
     
-    return 'qwen2.5:3b'; // Default fallback
+    return 'llama3.1:8b'; // Default fallback to general model
   }
 
   private getCacheKey(type: AIRequestType, input: any): string {

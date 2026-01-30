@@ -22,26 +22,26 @@ async function testOllama() {
     });
     console.log('');
 
-    // 2. Check recommended models
-    const recommended = ['qwen2.5:3b', 'codellama:7b', 'llava:latest'];
-    console.log('2️⃣  Checking recommended models...');
+    // 2. Check recommended production models
+    const recommended = ['llama3.1:8b', 'qwen2.5-coder:7b'];
+    console.log('2️⃣  Checking production models (AWS g4dn.xlarge)...');
     const loadedModels = models.models.map((m) => m.name);
     const missing = recommended.filter((m) => !loadedModels.includes(m));
     
     if (missing.length === 0) {
-      console.log('✅ All recommended models are loaded!');
+      console.log('✅ All production models are loaded!');
     } else {
       console.log(`⚠️  Missing models: ${missing.join(', ')}`);
-      console.log('💡 Run: ollama pull <model-name> to download');
+      console.log('💡 Run: ollama pull llama3.1:8b && ollama pull qwen2.5-coder:7b');
     }
     console.log('');
 
-    // 3. Test text generation with qwen2.5:3b
-    if (loadedModels.includes('qwen2.5:3b')) {
-      console.log('3️⃣  Testing text generation (qwen2.5:3b)...');
+    // 3. Test text generation with llama3.1:8b
+    if (loadedModels.includes('llama3.1:8b')) {
+      console.log('3️⃣  Testing text generation (llama3.1:8b)...');
       const startTime = Date.now();
       const response = await ollama.generate({
-        model: 'qwen2.5:3b',
+        model: 'llama3.1:8b',
         prompt: 'Hello! Can you tell me a short joke?',
         stream: false,
       });
@@ -51,16 +51,16 @@ async function testOllama() {
       console.log(`   "${response.response.substring(0, 100)}..."`);
       console.log('');
     } else {
-      console.log('3️⃣  Skipping text generation test (qwen2.5:3b not loaded)');
+      console.log('3️⃣  Skipping text generation test (llama3.1:8b not loaded)');
       console.log('');
     }
 
-    // 4. Test code generation with codellama:7b
-    if (loadedModels.includes('codellama:7b')) {
-      console.log('4️⃣  Testing code generation (codellama:7b)...');
+    // 4. Test code generation with qwen2.5-coder:7b
+    if (loadedModels.includes('qwen2.5-coder:7b')) {
+      console.log('4️⃣  Testing code generation (qwen2.5-coder:7b)...');
       const startTime = Date.now();
       const response = await ollama.generate({
-        model: 'codellama:7b',
+        model: 'qwen2.5-coder:7b',
         prompt: 'Write a Python function to calculate fibonacci numbers',
         stream: false,
       });
@@ -70,7 +70,7 @@ async function testOllama() {
       console.log(`   Preview: ${response.response.substring(0, 150)}...`);
       console.log('');
     } else {
-      console.log('4️⃣  Skipping code generation test (codellama:7b not loaded)');
+      console.log('4️⃣  Skipping code generation test (qwen2.5-coder:7b not loaded)');
       console.log('');
     }
 

@@ -353,7 +353,7 @@ export default async function chatbotHandler(req: Request, res: Response) {
           },
         ],
         {
-          model: 'qwen2.5:3b', // Use fast, general-purpose model for chatbot
+          model: 'llama3.1:8b', // Use general-purpose model for chatbot
           temperature: 0.7,
           stream: false,
         }

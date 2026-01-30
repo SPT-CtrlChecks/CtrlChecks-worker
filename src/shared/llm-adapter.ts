@@ -105,7 +105,7 @@ export class LLMAdapter {
       throw new Error('Ollama client not initialized. Set OLLAMA_HOST environment variable.');
     }
 
-    const model = options.model || 'llama2';
+    const model = options.model || 'llama3.1:8b';
     
     try {
       // Convert messages to Ollama format
@@ -181,13 +181,13 @@ export class LLMAdapter {
 
     try {
       const response = await this.ollama.embeddings({
-        model: 'llama2', // Default embedding model
+        model: 'llama3.1:8b', // Default embedding model
         prompt: text,
       });
 
       return {
         embedding: response.embedding,
-        model: 'llama2',
+        model: 'llama3.1:8b',  // Production model for embeddings
       };
     } catch (error) {
       if (error instanceof Error) {
@@ -552,17 +552,21 @@ export class LLMAdapter {
     if (model.startsWith('gpt-') || model.includes('openai')) {
       return 'openai';
     }
+    // Check for Ollama production models first
+    if (model.includes('llama3.1') || model.includes('qwen2.5-coder') || model.includes('ollama')) {
+      return 'ollama';
+    }
     if (model.startsWith('claude-') || model.includes('anthropic')) {
       return 'claude';
     }
     if (model.startsWith('gemini-') || model.includes('gemini')) {
       return 'gemini';
     }
-    if (model.includes('llama') || model.includes('ollama')) {
+    if (model.includes('llama') || model.includes('ollama') || model.includes('qwen2.5-coder')) {
       return 'ollama';
     }
-    // Default to OpenAI
-    return 'openai';
+    // Default to Ollama for production (instead of OpenAI)
+    return 'ollama';
   }
 
   /**
@@ -596,11 +600,8 @@ export class LLMAdapter {
         ];
       case 'ollama':
         return [
-          'llama2',
-          'llama3',
-          'mistral',
-          'codellama',
-          'phi',
+          'llama3.1:8b',
+          'qwen2.5-coder:7b',
         ];
       default:
         return [];
