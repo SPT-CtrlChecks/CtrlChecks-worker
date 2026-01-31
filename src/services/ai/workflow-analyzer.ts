@@ -20,6 +20,7 @@ export interface Question {
 }
 
 export type QuestionCategory = 
+  | 'node_selection'  // NEW: For selecting specific services/nodes
   | 'content'
   | 'schedule'
   | 'authentication'
@@ -27,6 +28,7 @@ export type QuestionCategory =
   | 'error_handling'
   | 'data_source'
   | 'preferences'
+  | 'credentials'  // NEW: For credentials (asked AFTER node selection)
   | 'other';
 
 /**
@@ -80,51 +82,78 @@ export class WorkflowAnalyzer {
 
   /**
    * Build system prompt with strict rules
+   * ENHANCED: Now guides node selection before credential collection
    */
   private buildSystemPrompt(): string {
-    return `You are an expert Autonomous Workflow Agent v2.5. Your role is to analyze user workflow requests and generate clarifying questions that help you understand business requirements.
+    return `You are an expert Autonomous Workflow Agent v2.5. Your role is to analyze user workflow requests and generate clarifying questions that help you understand business requirements and guide node selection.
 
 CRITICAL RULES - YOU MUST FOLLOW THESE:
 
-1. AUTONOMY PRINCIPLE:
-   - You are fully autonomous in workflow creation
-   - NEVER ask users about technical implementation details
-   - NEVER ask which nodes to use (you decide this)
-   - NEVER ask about workflow structure (you design this)
-   - ALWAYS ask about business requirements and missing information
+1. NODE SELECTION FIRST, CREDENTIALS SECOND:
+   - FIRST: Ask users to SELECT which specific services/nodes they want to use
+   - THEN: Ask for credentials ONLY for the selected services
+   - NEVER ask for all possible credentials upfront
+   - Example: "Which AI provider would you like to use?" → User selects "OpenAI" → THEN ask "Please provide your OpenAI API key"
 
-2. QUESTION QUALITY:
+2. SEQUENTIAL QUESTIONING PROTOCOL:
+   Step 1 - Trigger/Input Selection:
+   - "How should your workflow receive input?" (Webhook, Slack, Discord, Scheduled, Manual)
+   
+   Step 2 - AI/Processing Selection (if AI is needed):
+   - "Which AI service should process the data?" (OpenAI GPT, Anthropic Claude, Google Gemini, Local/Ollama)
+   - ONLY AFTER selection, ask for that specific API key
+   
+   Step 3 - Data Source Selection:
+   - "Where should the workflow retrieve knowledge/data from?" (Vector database, FAQ files, Product docs, API, Database)
+   - ONLY AFTER selection, ask for credentials if needed
+   
+   Step 4 - Output/Response Selection:
+   - "How should responses be delivered?" (Webhook response, Slack channel, Discord channel, Email, Database)
+   - ONLY AFTER selection, ask for tokens/credentials for that channel
+   
+   Step 5 - Error Handling Selection:
+   - "How should errors be handled?" (Fallback to human, Retry with backoff, Log and continue, Send alerts)
+
+3. AUTONOMY PRINCIPLE:
+   - You are fully autonomous in workflow creation
+   - NEVER ask about technical implementation details (node connections, data structures)
+   - NEVER ask "which node type" in technical terms
+   - DO ask "which service/provider" in business terms
+   - ALWAYS ask about business requirements and service preferences
+
+4. QUESTION QUALITY:
    - Questions must be clear, specific, and actionable
    - Each question should have 3-4 multiple choice options
-   - Options should cover common scenarios
+   - Options should represent actual service choices (OpenAI, Anthropic, etc.)
    - Questions should be in non-technical language
-   - Focus on WHAT the user wants, not HOW to implement it
+   - Focus on WHAT service the user wants, not HOW to implement it
 
-3. QUESTION CATEGORIES:
-   - Content: What data/content should be processed?
-   - Schedule: When/how often should this run?
-   - Authentication: Do you have credentials for services?
-   - Destination: Where should results go?
-   - Error Handling: How should errors be handled?
-   - Data Source: Where is data coming from?
-   - Preferences: Any specific requirements?
+5. QUESTION CATEGORIES (in priority order):
+   - node_selection: Which specific service/node to use (AI provider, data source, output channel)
+   - content: What data/content should be processed?
+   - schedule: When/how often should this run?
+   - data_source: Where is data coming from?
+   - destination: Where should results go?
+   - error_handling: How should errors be handled?
+   - credentials: Credentials for SELECTED services only (ask AFTER node selection)
 
-4. ANTI-PATTERNS (NEVER DO THESE):
-   ❌ "Which node type should we use?"
-   ❌ "What API endpoint should we call?"
-   ❌ "How should we structure the workflow?"
-   ❌ "Which database should we use?" (unless user hasn't specified)
-   ✅ "What content should be posted?"
-   ✅ "When should this run?"
-   ✅ "Do you have Twitter API credentials?"
+6. ANTI-PATTERNS (NEVER DO THESE):
+   ❌ "Which node type should we use?" (too technical)
+   ❌ "Do you have OpenAI, Anthropic, and Gemini API keys?" (asking for all upfront)
+   ❌ "What API endpoint should we call?" (technical detail)
+   ❌ "How should we structure the workflow?" (you decide this)
+   ✅ "Which AI provider would you like to use?" (service selection)
+   ✅ "Please provide your OpenAI API key" (AFTER user selects OpenAI)
+   ✅ "What content should be processed?" (business requirement)
 
-5. OUTPUT FORMAT:
+7. OUTPUT FORMAT:
    - Generate exactly 3-5 questions
+   - Prioritize node selection questions first
    - Each question must have unique ID (q1, q2, q3, etc.)
    - Summary must be 20-30 words exactly
    - Questions must be in JSON format
 
-Remember: You are an intelligent agent. Ask about business needs, not technical details.`;
+Remember: Ask users to SELECT services first, then ask for credentials for ONLY those selected services.`;
   }
 
   /**
@@ -154,53 +183,73 @@ User Request: "${userPrompt}"
 
     prompt += `Generate 3-5 clarifying questions following these guidelines:
 
-1. Identify missing business requirements:
+1. PRIORITY: Node/Service Selection Questions FIRST:
+   - If workflow needs AI: Ask "Which AI provider would you like to use?" with options: ["OpenAI GPT", "Anthropic Claude", "Google Gemini", "Local/Ollama"]
+   - If workflow needs data source: Ask "Where should data come from?" with options: ["Vector Database", "FAQ Files", "Product Documentation", "API", "Database"]
+   - If workflow needs output channel: Ask "Where should responses be delivered?" with options: ["Slack", "Discord", "Email", "Webhook Response", "Database"]
+   - If workflow needs trigger: Ask "How should the workflow be triggered?" with options: ["Webhook", "Slack Bot", "Discord Bot", "Scheduled", "Manual"]
+   - Use category: "node_selection" for these questions
+
+2. THEN: Ask for credentials ONLY for selected services:
+   - After user selects a service, ask for credentials for THAT service only
+   - Example: User selects "OpenAI GPT" → Ask "Please provide your OpenAI API key"
+   - Use category: "credentials" for these questions
+   - NEVER ask for credentials for services the user hasn't selected
+
+3. Identify missing business requirements:
    - What data/content needs to be processed?
    - What are the scheduling preferences?
-   - What are the authentication requirements?
    - Where should results be sent/stored?
 
-2. Identify uncertainties:
+4. Identify uncertainties:
    - Ambiguous time references (convert to specific times)
    - Unclear data sources or destinations
    - Missing configuration details
    - Edge cases or error handling preferences
 
-3. Extract implicit requirements:
+5. Extract implicit requirements:
    - Error handling needs (if user mentions "reliable", "important")
    - Logging needs (if user mentions "audit", "track")
    - Notification needs (if user mentions "alert", "notify")
 
-4. Question Format:
+6. Question Format:
    - Each question should be specific and actionable
    - Provide 3-4 multiple choice options
-   - Options should represent different scenarios or preferences
+   - Options should represent actual service choices (OpenAI, Anthropic, etc.) or scenarios
    - Question text should ONLY contain the question (no option letters)
 
-Example of CORRECT format:
+Example of CORRECT format (for chatbot workflow):
 {
-  "summary": "Automated daily Twitter posting workflow with scheduled content delivery at specified time",
+  "summary": "Automated customer support chatbot workflow with AI-powered responses and multi-channel delivery",
   "questions": [
     {
       "id": "q1",
-      "text": "What time should the post be sent?",
-      "options": ["9 AM", "12 PM", "6 PM", "Custom time"],
-      "category": "schedule"
+      "text": "Which AI provider would you like to use for generating responses?",
+      "options": ["OpenAI GPT", "Anthropic Claude", "Google Gemini", "Local/Ollama"],
+      "category": "node_selection"
     },
     {
       "id": "q2",
-      "text": "What content should be posted?",
-      "options": ["Static text message", "Dynamic content from API", "User-provided content", "Random from collection"],
-      "category": "content"
+      "text": "Where should the chatbot retrieve knowledge from?",
+      "options": ["Vector Database", "FAQ Files", "Product Documentation", "Previous Conversations"],
+      "category": "node_selection"
     },
     {
       "id": "q3",
-      "text": "Do you have Twitter API credentials configured?",
-      "options": ["Yes, I have credentials", "No, I need help setting up", "I'll provide them later"],
-      "category": "authentication"
+      "text": "Where should responses be delivered?",
+      "options": ["Slack Channel", "Discord Channel", "Webhook Response", "Email"],
+      "category": "node_selection"
+    },
+    {
+      "id": "q4",
+      "text": "What data should the chatbot use?",
+      "options": ["Customer FAQs", "Product Documentation", "User Feedback", "All of the above"],
+      "category": "content"
     }
   ]
 }
+
+Note: After user answers q1 with "OpenAI GPT", you would ask: "Please provide your OpenAI API key" (category: "credentials")
 
 Example of INCORRECT format (DO NOT DO THIS):
 {
@@ -214,15 +263,17 @@ Return ONLY valid JSON in this format:
   "questions": [
     {
       "id": "q1",
-      "text": "Question about business requirement?",
+      "text": "Question about service selection or business requirement?",
       "options": ["Option 1", "Option 2", "Option 3"],
-      "category": "content|schedule|authentication|destination|error_handling|data_source|preferences|other"
+      "category": "node_selection|content|schedule|credentials|destination|error_handling|data_source|preferences|other"
     }
   ],
-  "intent": "dataSync|notification|transformation|apiIntegration|scheduledTask",
+  "intent": "dataSync|notification|transformation|apiIntegration|scheduledTask|chatbot",
   "entities": ["entity1", "entity2"],
   "implicitRequirements": ["requirement1", "requirement2"]
-}`;
+}
+
+IMPORTANT: Prioritize "node_selection" questions first. Only ask "credentials" questions AFTER the user has selected specific services.`;
 
     return prompt;
   }
@@ -335,9 +386,11 @@ Return ONLY valid JSON in this format:
    */
   private normalizeCategory(category: any): QuestionCategory {
     const validCategories: QuestionCategory[] = [
+      'node_selection',
       'content',
       'schedule',
       'authentication',
+      'credentials',
       'destination',
       'error_handling',
       'data_source',

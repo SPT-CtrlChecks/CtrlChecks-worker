@@ -7,6 +7,8 @@ import { config } from '../core/config';
 import { LLMAdapter } from '../shared/llm-adapter';
 import { HuggingFaceRouterClient } from '../shared/huggingface-client';
 import { getGoogleAccessToken } from '../shared/google-sheets';
+import { getExecutionStateManager } from '../services/workflow-executor/execution-state-manager';
+import { VisualizationService } from '../services/workflow-executor/visualization-service';
 
 interface WorkflowNode {
   id: string;
@@ -124,6 +126,235 @@ function getNestedValue(obj: unknown, path: string): unknown {
 }
 
 /**
+ * Safely serialize object to avoid circular references
+ */
+function safeSerialize(
+  obj: unknown, 
+  maxDepth: number = 3, 
+  currentDepth: number = 0,
+  seen: WeakSet<object> = new WeakSet()
+): unknown {
+  if (currentDepth >= maxDepth) {
+    return '[Max Depth Reached]';
+  }
+  
+  if (obj === null || obj === undefined) {
+    return obj;
+  }
+  
+  if (typeof obj !== 'object') {
+    return obj;
+  }
+  
+  // Check for circular reference
+  if (seen.has(obj)) {
+    return '[Circular Reference]';
+  }
+  
+  // Add to seen set
+  seen.add(obj);
+  
+  if (Array.isArray(obj)) {
+    return obj.map(item => safeSerialize(item, maxDepth, currentDepth + 1, seen));
+  }
+  
+  // For objects, create a shallow copy without circular references
+  const serialized: Record<string, unknown> = {};
+  
+  for (const [key, value] of Object.entries(obj)) {
+    // Skip execution_trace to avoid circular reference
+    if (key === 'execution_trace' || key === 'execution_sequence') {
+      continue;
+    }
+    
+    serialized[key] = safeSerialize(value, maxDepth, currentDepth + 1, seen);
+  }
+  
+  return serialized;
+}
+
+/**
+ * Add execution trace entry to output, preserving existing trace
+ * Avoids circular references by serializing input/output safely
+ */
+function addExecutionTrace(
+  output: Record<string, unknown>,
+  input: Record<string, unknown>,
+  nodeLabel: string,
+  nodeType: string
+): void {
+  // Initialize or preserve execution trace array
+  const existingTrace = Array.isArray(input.execution_trace) 
+    ? [...input.execution_trace] 
+    : [];
+  
+  // Create a copy of output WITHOUT execution_trace to serialize
+  const outputForSerialization = { ...output };
+  delete outputForSerialization.execution_trace;
+  delete outputForSerialization.execution_sequence;
+  
+  // Create a copy of input WITHOUT execution_trace to serialize
+  const inputForSerialization = { ...input };
+  delete inputForSerialization.execution_trace;
+  delete inputForSerialization.execution_sequence;
+  
+  // Safely serialize input and output to avoid circular references
+  const serializedInput = safeSerialize(inputForSerialization);
+  const serializedOutput = safeSerialize(outputForSerialization);
+  
+  // Add current node's execution record
+  existingTrace.push({
+    node: nodeLabel,
+    nodeType: nodeType,
+    timestamp: new Date().toISOString(),
+    input: serializedInput,
+    output: serializedOutput,
+  });
+  
+  // Preserve trace in output (but don't include it in the trace itself to avoid circular ref)
+  output.execution_trace = existingTrace;
+  output.execution_sequence = existingTrace; // Alias for compatibility
+}
+
+/**
+ * Preserve all input data in output (for data flow preservation)
+ */
+function preserveInputData(
+  output: Record<string, unknown>,
+  input: Record<string, unknown>
+): void {
+  // Merge all input data into output (don't overwrite existing output fields)
+  Object.keys(input).forEach(key => {
+    if (!(key in output) || output[key] === undefined || output[key] === null) {
+      output[key] = input[key];
+    }
+  });
+}
+
+/**
+ * Clean final output by removing all internal debug and metadata fields
+ * This ensures only user-visible data is returned in the final response
+ */
+function cleanFinalOutput(output: unknown): unknown {
+  if (output === null || output === undefined) {
+    return output;
+  }
+
+  if (typeof output !== 'object') {
+    return output;
+  }
+
+  if (Array.isArray(output)) {
+    return output.map(item => cleanFinalOutput(item));
+  }
+
+  const cleaned: Record<string, unknown> = {};
+  const internalFields = new Set([
+    'execution_trace',
+    'execution_sequence',
+    'workflow_id',
+    '_workflow_id',
+    '_user_id',
+    '_logs',
+    '_error',
+    '_form_node',
+    '_node_id',
+    'condition_evaluated',
+    'condition_expression',
+    'branch_taken',
+    'node_if_else_result',
+    'matchedCase',
+    'caseLabel',
+  ]);
+
+  for (const [key, value] of Object.entries(output as Record<string, unknown>)) {
+    // Skip internal debug fields
+    if (internalFields.has(key)) {
+      continue;
+    }
+
+    // Skip fields that start with underscore (internal metadata)
+    if (key.startsWith('_') && key !== '_session_id') {
+      continue;
+    }
+
+    // Recursively clean nested objects
+    cleaned[key] = cleanFinalOutput(value);
+  }
+
+  return cleaned;
+}
+
+/**
+ * Check if a node should be executed based on IF/Else and Switch branch results
+ */
+function shouldExecuteNode(
+  node: WorkflowNode,
+  edges: WorkflowEdge[],
+  ifElseResults: Record<string, boolean>,
+  switchResults: Record<string, string | null>,
+  nodes: WorkflowNode[]
+): boolean {
+  const inputEdges = edges.filter(e => e.target === node.id);
+
+  // If no input edges, it's a trigger node - always execute
+  if (inputEdges.length === 0) {
+    return true;
+  }
+
+  // Check if all input edges are from conditional nodes and none are valid
+  const validInputEdges = inputEdges.filter(edge => {
+    if (!edge.sourceHandle) {
+      // Regular edge (no conditional routing) - always valid
+      return true;
+    }
+
+    const sourceNode = nodes.find(n => n.id === edge.source);
+    if (!sourceNode) {
+      return false;
+    }
+
+    // Handle IF/Else nodes
+    if (sourceNode.data.type === 'if_else') {
+      const conditionResult = ifElseResults[edge.source];
+      if (conditionResult === undefined) {
+        // Condition not evaluated yet - shouldn't happen in topological order
+        return false;
+      }
+      const expectedPath = edge.sourceHandle; // "true" or "false"
+      return (expectedPath === 'true' && conditionResult) || (expectedPath === 'false' && !conditionResult);
+    }
+
+    // Handle Switch nodes
+    if (sourceNode.data.type === 'switch') {
+      const matchedCase = switchResults[edge.source];
+      if (matchedCase === undefined) {
+        // Switch not evaluated yet - shouldn't happen in topological order
+        return false;
+      }
+      return matchedCase !== null && String(matchedCase) === String(edge.sourceHandle);
+    }
+
+    // Unknown conditional node type
+    return false;
+  });
+
+  // If node only has conditional inputs and none are valid, skip it
+  const hasOnlyConditionalInputs = inputEdges.length > 0 && inputEdges.every(e => {
+    if (!e.sourceHandle) return false;
+    const sourceNode = nodes.find(n => n.id === e.source);
+    return sourceNode?.data.type === 'if_else' || sourceNode?.data.type === 'switch';
+  });
+
+  if (hasOnlyConditionalInputs && validInputEdges.length === 0) {
+    return false;
+  }
+
+  // Node has at least one valid input edge
+  return validInputEdges.length > 0;
+}
+
+/**
  * Resolve template variables in string (e.g., "Hello {{name}}" or "{{input.value}}" or "{{$json.value1}}")
  * Supports:
  * - {{key}} - direct context access
@@ -225,12 +456,17 @@ export async function executeNode(
   // Handle different node types
   switch (type) {
     case 'manual_trigger': {
-      return {
+      // Initialize execution trace for the workflow
+      const output = {
         trigger: 'manual',
         workflow_id: workflowId,
         ...inputObj,
         executed_at: new Date().toISOString(),
+        execution_trace: [], // Initialize trace array
+        execution_sequence: [], // Alias
       };
+      addExecutionTrace(output, inputObj, node.data.label, type);
+      return output;
     }
 
     case 'webhook':
@@ -420,7 +656,7 @@ export async function executeNode(
 
     case 'log':
     case 'log_output': {
-      // Log output node: Logs a message
+      // Log output node: Logs a message and appends to execution trace
       // Config: { message: 'Debug: {{input}}', level: 'info' }
       const message = getStringProperty(config, 'message', '');
       const level = getStringProperty(config, 'level', 'info');
@@ -454,14 +690,28 @@ export async function executeNode(
           console.log(`${logPrefix} ${resolvedMessage}`);
       }
       
-      return {
+      // Create unique log field name to avoid overwriting
+      const logFieldName = `log_${node.id.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      
+      // Preserve existing logs array or create new one
+      const existingLogs = Array.isArray(inputObj._logs) ? [...inputObj._logs] : [];
+      existingLogs.push({
+        message: resolvedMessage,
+        level,
+        timestamp: new Date().toISOString(),
+        node: node.data.label,
+      });
+      
+      const output = {
         ...inputObj,
-        _logs: [{ 
-          message: resolvedMessage, 
-          level,
-          timestamp: new Date().toISOString() 
-        }],
+        _logs: existingLogs, // Append to existing logs
+        [logFieldName]: resolvedMessage, // Unique field for this node's log
+        log_message: resolvedMessage, // General log field
       };
+      
+      preserveInputData(output, inputObj);
+      addExecutionTrace(output, inputObj, node.data.label, type);
+      return output;
     }
 
     case 'openai_gpt':
@@ -471,6 +721,23 @@ export async function executeNode(
       const model = getStringProperty(config, 'model', 'gpt-4o');
       const provider = type === 'openai_gpt' ? 'openai' : 
                       type === 'anthropic_claude' ? 'claude' : 'gemini';
+      
+      // Get API key from node config FIRST, then fall back to environment variables
+      // This ensures user-provided values in node properties take priority
+      let apiKey: string | undefined;
+      const configApiKey = getStringProperty(config, 'apiKey', '');
+      if (configApiKey && configApiKey.trim() !== '') {
+        apiKey = configApiKey.trim();
+      } else {
+        // Only fall back to environment variables if config doesn't have it
+        if (provider === 'openai') {
+          apiKey = process.env.OPENAI_API_KEY;
+        } else if (provider === 'claude') {
+          apiKey = process.env.ANTHROPIC_API_KEY;
+        } else if (provider === 'gemini') {
+          apiKey = process.env.GEMINI_API_KEY;
+        }
+      }
       
       // Build context with $json and json aliases
       const context = {
@@ -484,12 +751,21 @@ export async function executeNode(
       const llmAdapter = new LLMAdapter();
       const response = await llmAdapter.chat(provider, [
         { role: 'user', content: resolvedPrompt }
-      ], { model });
+      ], { 
+        model,
+        apiKey, // Pass API key from config or env
+      });
 
-      return {
+      const output = {
+        ...inputObj,
         response: response.content,
         model: response.model,
+        [`node_${type}_response`]: response.content, // Unique field name
       };
+      
+      preserveInputData(output, inputObj);
+      addExecutionTrace(output, inputObj, node.data.label, type);
+      return output;
     }
 
     case 'ai_agent': {
@@ -787,10 +1063,13 @@ export async function executeNode(
       const code = getStringProperty(config, 'code', '');
       
       if (!code) {
-        return {
+        const output = {
           ...inputObj,
           _error: 'JavaScript node: Code is required',
         };
+        preserveInputData(output, inputObj);
+        addExecutionTrace(output, inputObj, node.data.label, type);
+        return output;
       }
 
       // Build context for code execution
@@ -804,10 +1083,13 @@ export async function executeNode(
 
       // Security: Check if JavaScript execution is enabled
       if (process.env.DISABLE_JAVASCRIPT_NODE === 'true') {
-        return {
+        const output = {
           ...inputObj,
           _error: 'JavaScript node execution is disabled for security reasons',
         };
+        preserveInputData(output, inputObj);
+        addExecutionTrace(output, inputObj, node.data.label, type);
+        return output;
       }
 
       try {
@@ -820,12 +1102,29 @@ export async function executeNode(
           console.warn('[Security] JavaScript node execution in production - consider using vm2 or isolated-vm');
         }
         
+        // Create a clean copy of input without execution_trace to avoid circular refs
+        const cleanInput = { ...inputObj };
+        delete cleanInput.execution_trace;
+        delete cleanInput.execution_sequence;
+        
+        const cleanNodeOutputs: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(nodeOutputs)) {
+          if (typeof value === 'object' && value !== null) {
+            const cleanValue = { ...value as Record<string, unknown> };
+            delete cleanValue.execution_trace;
+            delete cleanValue.execution_sequence;
+            cleanNodeOutputs[key] = cleanValue;
+          } else {
+            cleanNodeOutputs[key] = value;
+          }
+        }
+        
         const wrappedCode = `
           (function() {
-            const input = ${JSON.stringify(inputObj)};
-            const $json = ${JSON.stringify(inputObj)};
-            const json = ${JSON.stringify(inputObj)};
-            const nodeOutputs = ${JSON.stringify(nodeOutputs)};
+            const input = ${JSON.stringify(cleanInput)};
+            const $json = ${JSON.stringify(cleanInput)};
+            const json = ${JSON.stringify(cleanInput)};
+            const nodeOutputs = ${JSON.stringify(cleanNodeOutputs)};
             
             ${code}
             
@@ -835,13 +1134,175 @@ export async function executeNode(
         `;
 
         const result = eval(wrappedCode);
-        return result;
+        
+        // Ensure result is an object and preserve input data
+        const output = typeof result === 'object' && result !== null && !Array.isArray(result)
+          ? { ...inputObj, ...result }
+          : { ...inputObj, node_javascript_result: result };
+        
+        preserveInputData(output, inputObj);
+        addExecutionTrace(output, inputObj, node.data.label, type);
+        return output;
       } catch (error) {
         console.error('JavaScript execution error:', error);
-        return {
+        const output = {
           ...inputObj,
           _error: error instanceof Error ? error.message : 'JavaScript execution failed',
         };
+        preserveInputData(output, inputObj);
+        addExecutionTrace(output, inputObj, node.data.label, type);
+        return output;
+      }
+    }
+
+    case 'text_formatter': {
+      // Text Formatter node - processes template strings with placeholders
+      const template = getStringProperty(config, 'template', '');
+      
+      if (!template) {
+        const output = {
+          ...inputObj,
+          _error: 'Text Formatter node: Template is required',
+          formattedText: '',
+        };
+        preserveInputData(output, inputObj);
+        addExecutionTrace(output, inputObj, node.data.label, type);
+        return output;
+      }
+
+      // Build context for template resolution
+      const context = {
+        input: inputObj,
+        ...nodeOutputs,
+        ...inputObj,
+        $json: inputObj,
+        json: inputObj,
+      };
+
+      try {
+        // Resolve template variables (e.g., {{name}}, {{$json.value}}, etc.)
+        const formattedText = resolveTemplate(template, context);
+        
+        // Return formatted text along with original input data
+        // This allows downstream nodes to access both the formatted text and original data
+        const output = {
+          ...inputObj,
+          formattedText,
+          text: formattedText, // Alias for compatibility
+          output: formattedText, // Another alias
+          node_text_formatter_output: formattedText, // Unique field name
+        };
+        preserveInputData(output, inputObj);
+        addExecutionTrace(output, inputObj, node.data.label, type);
+        return output;
+      } catch (error) {
+        console.error('Text Formatter execution error:', error);
+        const output = {
+          ...inputObj,
+          _error: error instanceof Error ? error.message : 'Text Formatter execution failed',
+          formattedText: template, // Return template as-is if resolution fails
+        };
+        preserveInputData(output, inputObj);
+        addExecutionTrace(output, inputObj, node.data.label, type);
+        return output;
+      }
+    }
+
+    case 'if_else': {
+      // If/Else conditional branching node
+      const conditionExpr = getStringProperty(config, 'condition', '');
+      
+      if (!conditionExpr) {
+        const output = {
+          ...inputObj,
+          _error: 'If/Else node: Condition is required',
+          condition_result: false,
+        };
+        preserveInputData(output, inputObj);
+        addExecutionTrace(output, inputObj, node.data.label, type);
+        return output;
+      }
+
+      // Build context for condition evaluation
+      const context = {
+        input: inputObj,
+        ...nodeOutputs,
+        ...inputObj,
+        $json: inputObj,
+        json: inputObj,
+      };
+
+      try {
+        // First, resolve template variables in condition (e.g., {{input.age}})
+        let resolvedCondition = resolveTemplate(conditionExpr, context);
+        
+        // If the resolved condition still contains template syntax, try direct evaluation
+        // This handles cases where the condition is a direct JavaScript expression
+        if (resolvedCondition === conditionExpr && !resolvedCondition.includes('{{')) {
+          // Condition is already a JavaScript expression, use it directly
+          resolvedCondition = conditionExpr;
+        }
+        
+        // Build evaluation context with input data accessible
+        const evalContext = {
+          input: inputObj,
+          ...inputObj, // Make input properties directly accessible
+          $json: inputObj,
+          json: inputObj,
+        };
+        
+        // Create a safe evaluation function
+        // Replace template variables with actual values in the expression
+        let evalExpression = resolvedCondition;
+        
+        // Replace {{input.field}} or {{field}} with actual values
+        evalExpression = evalExpression.replace(/\{\{([^}]+)\}\}/g, (match, path) => {
+          const trimmedPath = path.trim();
+          // Remove 'input.' prefix if present
+          const fieldPath = trimmedPath.startsWith('input.') 
+            ? trimmedPath.substring(6) 
+            : trimmedPath;
+          
+          // Get value from context
+          const value = getNestedValue(evalContext, fieldPath);
+          if (value !== null && value !== undefined) {
+            // Return as JSON if object/array, otherwise as literal
+            if (typeof value === 'object') {
+              return JSON.stringify(value);
+            }
+            return typeof value === 'string' ? `"${value.replace(/"/g, '\\"')}"` : String(value);
+          }
+          return match; // Keep original if not found
+        });
+        
+        // Evaluate condition as JavaScript expression
+        // Security: In production, consider using a safer evaluator
+        const conditionResult = eval(evalExpression);
+        const isTrue = Boolean(conditionResult);
+        
+        // Return result with condition evaluation
+        const output = {
+          ...inputObj,
+          condition_result: isTrue,
+          condition_evaluated: resolvedCondition,
+          condition_expression: evalExpression,
+          branch_taken: isTrue ? 'true' : 'false',
+          node_if_else_result: isTrue, // Unique field name
+        };
+        preserveInputData(output, inputObj);
+        addExecutionTrace(output, inputObj, node.data.label, type);
+        return output;
+      } catch (error) {
+        console.error('If/Else execution error:', error);
+        const output = {
+          ...inputObj,
+          _error: error instanceof Error ? error.message : 'If/Else condition evaluation failed',
+          condition_result: false,
+          condition_original: conditionExpr,
+        };
+        preserveInputData(output, inputObj);
+        addExecutionTrace(output, inputObj, node.data.label, type);
+        return output;
       }
     }
 
@@ -1299,6 +1760,28 @@ export default async function executeWorkflowHandler(req: Request, res: Response
     const executionOrder = allNodes.filter(n => n.data.type !== 'error_trigger');
     const errorTriggerNodes = allNodes.filter(n => n.data.type === 'error_trigger');
 
+    // Initialize real-time execution state tracking
+    let stateManager: ReturnType<typeof getExecutionStateManager> | null = null;
+    let visualizationService: VisualizationService | null = null;
+    if (executionId) {
+      try {
+        stateManager = getExecutionStateManager();
+        stateManager.initializeExecution(
+          executionId,
+          workflowId,
+          executionOrder.length,
+          input
+        );
+        
+        // Try to get visualization service instance (may not be initialized)
+        // We'll create a temporary one if needed for this execution
+        visualizationService = new VisualizationService(stateManager);
+      } catch (error) {
+        console.warn('[execute-workflow] Real-time state tracking unavailable:', error);
+        // Continue execution without real-time updates
+      }
+    }
+
     // If resuming from form submission, find where we left off
     let startFromIndex = 0;
     if (providedExecutionId) {
@@ -1340,44 +1823,121 @@ export default async function executeWorkflowHandler(req: Request, res: Response
     }
 
     let finalOutput: unknown = input;
+    let lastExecutedNode: WorkflowNode | null = null;
     let hasError = false;
     let errorMessage = '';
 
-    // Execute nodes in order (starting from resume point if applicable)
-    for (let i = startFromIndex; i < executionOrder.length; i++) {
-      const node = executionOrder[i];
-      const log: ExecutionLog = {
-        nodeId: node.id,
-        nodeName: node.data.label,
-        status: 'running',
-        startedAt: new Date().toISOString(),
-      };
+    // Build dynamic execution order that respects IF/Else and Switch branching
+    // We'll process nodes sequentially and skip nodes that are not in the selected path
+    const executedNodeIds = new Set<string>();
+    
+    // If resuming, mark all nodes before the resume point as executed
+    if (startFromIndex > 0) {
+      for (let i = 0; i < startFromIndex; i++) {
+        executedNodeIds.add(executionOrder[i].id);
+      }
+    }
+    
+    // Start with nodes that have no dependencies (trigger nodes)
+    const getNextExecutableNodes = (): WorkflowNode[] => {
+      return executionOrder.filter(node => {
+        // Skip if already executed
+        if (executedNodeIds.has(node.id)) {
+          return false;
+        }
 
-      try {
-        // Determine node input based on incoming edges
-        let nodeInput: unknown = input;
-
+        // Check if all dependencies are satisfied
         const inputEdges = edges.filter(e => e.target === node.id);
+        if (inputEdges.length === 0) {
+          // No dependencies - trigger node
+          return true;
+        }
+
+        // Check if all source nodes have been executed
+        const allDependenciesExecuted = inputEdges.every(edge => {
+          // For conditional edges, also check if the branch is valid
+          if (edge.sourceHandle) {
+            const sourceNode = nodes.find(n => n.id === edge.source);
+            if (!sourceNode) return false;
+            
+            // Source must be executed
+            if (!executedNodeIds.has(edge.source)) {
+              return false;
+            }
+
+            // Check branch validity
+            if (sourceNode.data.type === 'if_else') {
+              const conditionResult = ifElseResults[edge.source];
+              if (conditionResult === undefined) return false;
+              const expectedPath = edge.sourceHandle;
+              return (expectedPath === 'true' && conditionResult) || (expectedPath === 'false' && !conditionResult);
+            }
+
+            if (sourceNode.data.type === 'switch') {
+              const matchedCase = switchResults[edge.source];
+              if (matchedCase === undefined) return false;
+              return matchedCase !== null && String(matchedCase) === String(edge.sourceHandle);
+            }
+          }
+
+          // Regular edge - just check if source is executed
+          return executedNodeIds.has(edge.source);
+        });
+
+        return allDependenciesExecuted;
+      });
+    };
+
+    // Execute nodes sequentially, building the execution order dynamically
+    while (true) {
+      const nextNodes = getNextExecutableNodes();
+      if (nextNodes.length === 0) {
+        break; // No more nodes to execute
+      }
+
+      // Execute all available nodes (in case of parallel branches)
+      for (const node of nextNodes) {
+        // Check if node should be executed based on branch conditions
+        if (!shouldExecuteNode(node, edges, ifElseResults, switchResults, nodes)) {
+          // Skip this node - it's on a branch that wasn't taken
+          executedNodeIds.add(node.id);
+          continue;
+        }
+
+        const log: ExecutionLog = {
+          nodeId: node.id,
+          nodeName: node.data.label,
+          status: 'running',
+          startedAt: new Date().toISOString(),
+        };
+
+        try {
+          // Determine node input based on incoming edges
+          let nodeInput: unknown = input;
+
+          const inputEdges = edges.filter(e => e.target === node.id);
         
         // Special handling for AI Agent node with port-specific connections
         if (node.data.type === 'ai_agent' && inputEdges.length > 0) {
           const portInputs: Record<string, unknown> = {};
           
           inputEdges.forEach(edge => {
-            const sourceOutput = nodeOutputs[edge.source];
-            if (sourceOutput !== undefined) {
-              const targetHandle = edge.targetHandle || 'default';
+          const sourceOutput = nodeOutputs[edge.source];
+          if (sourceOutput !== undefined) {
+            // Clean source output before passing to next node (remove execution_trace to avoid bloat)
+            const cleanedSourceOutput = cleanFinalOutput(sourceOutput);
+            const targetHandle = edge.targetHandle || 'default';
               
               // Map port handles to input structure
               if (targetHandle === 'chat_model') {
-                portInputs.chat_model = sourceOutput;
+                portInputs.chat_model = cleanedSourceOutput;
               } else if (targetHandle === 'memory') {
-                portInputs.memory = sourceOutput;
+                portInputs.memory = cleanedSourceOutput;
               } else if (targetHandle === 'tool') {
-                portInputs.tool = sourceOutput;
+                portInputs.tool = cleanedSourceOutput;
               } else {
                 // Default port or no handle specified - treat as user input
-                portInputs.userInput = sourceOutput;
+                portInputs.userInput = cleanedSourceOutput;
               }
             }
           });
@@ -1390,20 +1950,39 @@ export default async function executeWorkflowHandler(req: Request, res: Response
           const sourceOutput = nodeOutputs[sourceNodeId];
           
           if (sourceOutput !== undefined) {
-            nodeInput = sourceOutput;
+            // Clean source output before passing to next node (remove execution_trace to avoid bloat)
+            nodeInput = cleanFinalOutput(sourceOutput);
           } else if (inputEdges.length > 1) {
-            // Multiple inputs - merge them
+            // Multiple inputs - merge them (cleaned)
             nodeInput = inputEdges.reduce((acc, edge) => {
               const sourceOutput = nodeOutputs[edge.source];
               if (sourceOutput !== undefined) {
-                return { ...extractInputObject(acc), ...extractInputObject(sourceOutput) };
+                const cleanedSourceOutput = cleanFinalOutput(sourceOutput);
+                return { ...extractInputObject(acc), ...extractInputObject(cleanedSourceOutput) };
               }
               return acc;
             }, {});
           }
         }
 
-        log.input = nodeInput;
+        // Clean input before storing in log (remove internal debug fields for UI display)
+        const cleanedNodeInput = cleanFinalOutput(nodeInput);
+        log.input = cleanedNodeInput;
+
+        // Update real-time state: Node started
+        if (stateManager && executionId) {
+          try {
+            stateManager.updateNodeState(
+              executionId,
+              node.id,
+              node.data.label,
+              'running',
+              { input: nodeInput }
+            );
+          } catch (stateError) {
+            console.warn(`[execute-workflow] Failed to update node state for ${node.id}:`, stateError);
+          }
+        }
 
         // Handle form nodes - pause execution and wait for form submission
         // Check BEFORE executing the node to avoid unnecessary work
@@ -1525,13 +2104,20 @@ export default async function executeWorkflowHandler(req: Request, res: Response
 
         // CRITICAL: Store output in nodeOutputs for state propagation
         // This allows subsequent nodes to access this node's output
+        // Note: We keep execution_trace internally but clean it when passing to next nodes
         nodeOutputs[node.id] = output;
+        
+        // Track the last executed node - this will be our final output
+        lastExecutedNode = node;
         finalOutput = output;
 
         // Handle If/Else and Switch nodes
         if (node.data.type === 'if_else' && typeof output === 'object' && output !== null) {
           const outputObj = output as Record<string, unknown>;
-          if (typeof outputObj.condition === 'boolean') {
+          // Extract condition result from various possible fields
+          if (typeof outputObj.condition_result === 'boolean') {
+            ifElseResults[node.id] = outputObj.condition_result;
+          } else if (typeof outputObj.condition === 'boolean') {
             ifElseResults[node.id] = outputObj.condition;
           }
         }
@@ -1543,9 +2129,34 @@ export default async function executeWorkflowHandler(req: Request, res: Response
           }
         }
 
-        log.output = output;
+        // Clean output before storing in log (remove internal debug fields for UI display)
+        const cleanedNodeOutput = cleanFinalOutput(output);
+        
+        log.output = cleanedNodeOutput; // Store cleaned output in log for UI
         log.status = 'success';
         log.finishedAt = new Date().toISOString();
+        
+        // Store full output (with execution_trace) in nodeOutputs for internal use
+        // But clean it when passing to next nodes to avoid bloat
+        nodeOutputs[node.id] = output;
+        
+        // Mark node as executed
+        executedNodeIds.add(node.id);
+
+        // Update real-time state: Node completed successfully
+        if (stateManager && executionId) {
+          try {
+            stateManager.updateNodeState(
+              executionId,
+              node.id,
+              node.data.label,
+              'success',
+              { output }
+            );
+          } catch (stateError) {
+            console.warn(`[execute-workflow] Failed to update node state for ${node.id}:`, stateError);
+          }
+        }
       } catch (error) {
         console.error(`Node ${node.data.label} ERROR:`, error);
         
@@ -1555,6 +2166,21 @@ export default async function executeWorkflowHandler(req: Request, res: Response
         log.finishedAt = new Date().toISOString();
         hasError = true;
         errorMessage = log.error;
+
+        // Update real-time state: Node error
+        if (stateManager && executionId) {
+          try {
+            stateManager.updateNodeState(
+              executionId,
+              node.id,
+              node.data.label,
+              'error',
+              { error: errorObj.message }
+            );
+          } catch (stateError) {
+            console.warn(`[execute-workflow] Failed to update node error state for ${node.id}:`, stateError);
+          }
+        }
 
         // Execute error trigger nodes if any
         if (errorTriggerNodes.length > 0) {
@@ -1582,11 +2208,15 @@ export default async function executeWorkflowHandler(req: Request, res: Response
           }
         }
 
+        // Mark node as executed even on error (to prevent infinite loops)
+        executedNodeIds.add(node.id);
+        
         // Break execution on error (unless error handler continues)
         break;
       }
 
       logs.push(log);
+      }
     }
 
     // Update execution with final status
@@ -1609,11 +2239,29 @@ export default async function executeWorkflowHandler(req: Request, res: Response
     }
     
     const finalStatus = hasError ? 'failed' : 'success';
+    
+    // Update real-time state: Final execution state
+    if (stateManager && executionId) {
+      try {
+        if (hasError) {
+          stateManager.setExecutionError(executionId, errorMessage);
+        } else {
+          stateManager.setExecutionOutput(executionId, finalOutput);
+        }
+      } catch (stateError) {
+        console.warn(`[execute-workflow] Failed to update final execution state:`, stateError);
+      }
+    }
+
+    // Clean final output - remove all internal debug fields
+    const cleanedOutput = cleanFinalOutput(finalOutput);
+    
+    // Store cleaned output in database (keep full output internally for debugging)
     await supabase
       .from('executions')
       .update({
         status: finalStatus,
-        output: finalOutput,
+        output: cleanedOutput, // Store cleaned output
         logs,
         finished_at: finishedAt,
         duration_ms: durationMs,
@@ -1621,13 +2269,13 @@ export default async function executeWorkflowHandler(req: Request, res: Response
       })
       .eq('id', executionId);
 
-    // Return response
+    // Return response with cleaned output
     if (hasError) {
       return res.status(500).json({
         error: errorMessage,
         executionId,
         logs,
-        output: finalOutput,
+        output: cleanedOutput, // Return cleaned output
       });
     }
 
@@ -1635,7 +2283,7 @@ export default async function executeWorkflowHandler(req: Request, res: Response
       status: 'success',
       success: true,
       executionId,
-      output: finalOutput,
+      output: cleanedOutput, // Return cleaned output - only last node's output, no debug fields
       logs,
       durationMs,
     });

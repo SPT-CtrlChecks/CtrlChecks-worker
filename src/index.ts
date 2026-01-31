@@ -278,6 +278,22 @@ async function startServer() {
   
   try {
     const server = app.listen(PORT, '0.0.0.0', () => {
+      // Initialize WebSocket server for real-time visualization
+      try {
+        const { getExecutionStateManager } = require('./services/workflow-executor/execution-state-manager');
+        const { VisualizationService } = require('./services/workflow-executor/visualization-service');
+        
+        const stateManager = getExecutionStateManager();
+        const visualizationService = new VisualizationService(stateManager);
+        visualizationService.initialize(server);
+        
+        console.log('📡 WebSocket server initialized for real-time execution visualization');
+        console.log(`   WebSocket endpoint: ws://localhost:${PORT}/ws/executions`);
+      } catch (wsError: any) {
+        console.warn('⚠️  WebSocket initialization failed:', wsError?.message || wsError);
+        console.log('⚠️  Real-time visualization may be unavailable');
+        console.log('💡 Make sure "ws" package is installed: npm install ws');
+      }
       const networkAddresses = getNetworkAddresses(PORT);
       
       console.log('\n' + '='.repeat(60));

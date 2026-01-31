@@ -231,9 +231,9 @@ export class AgenticWorkflowBuilder {
       ? await requirementsExtractor.extractRequirements(userPrompt, systemPrompt, answers, constraints)
       : await this.extractWorkflowRequirements(userPrompt, systemPrompt, constraints);
     
-    // Step 4.5: Identify required credentials BEFORE building
+    // Step 4.5: Identify required credentials BEFORE building (only for selected services)
     onProgress?.({ step: 4, stepName: 'Credential Analysis', progress: 45, details: { message: 'Identifying required credentials...' } });
-    const requiredCredentials = await this.identifyRequiredCredentials(requirements, userPrompt);
+    const requiredCredentials = await this.identifyRequiredCredentials(requirements, userPrompt, answers);
     
     // Step 5: Build workflow
     onProgress?.({ step: 5, stepName: 'Building', progress: 50, details: { message: 'Building workflow structure...' } });
@@ -341,42 +341,89 @@ export class AgenticWorkflowBuilder {
 
   /**
    * Identify required credentials for the workflow
-   * Analyzes requirements and node types to determine what credentials are needed
+   * ENHANCED: Only identifies credentials for services that the user has selected
+   * Analyzes user answers to determine which services were selected, then identifies credentials for those only
    */
   private async identifyRequiredCredentials(
     requirements: Requirements,
-    userPrompt: string
+    userPrompt: string,
+    answers?: Record<string, string>
   ): Promise<string[]> {
     const credentials: string[] = [];
-    const promptLower = userPrompt.toLowerCase();
     
-    // Check for AI services
-    if (promptLower.includes('openai') || promptLower.includes('gpt') || promptLower.includes('chatgpt')) {
-      credentials.push('OPENAI_API_KEY');
-    }
-    if (promptLower.includes('claude') || promptLower.includes('anthropic')) {
-      credentials.push('ANTHROPIC_API_KEY');
-    }
-    if (promptLower.includes('gemini') || promptLower.includes('google ai')) {
-      credentials.push('GEMINI_API_KEY');
-    }
+    // Extract node selections from user answers
+    const selectedServices = this.extractSelectedServices(answers || {});
     
-    // Check for platforms
-    if (promptLower.includes('slack')) {
-      credentials.push('SLACK_TOKEN', 'SLACK_WEBHOOK_URL');
-    }
-    if (promptLower.includes('discord')) {
-      credentials.push('DISCORD_WEBHOOK_URL');
-    }
-    if (promptLower.includes('google') && (promptLower.includes('sheet') || promptLower.includes('gmail') || promptLower.includes('drive'))) {
-      credentials.push('GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET');
-    }
-    if (promptLower.includes('email') || promptLower.includes('smtp')) {
-      credentials.push('SMTP_HOST', 'SMTP_USERNAME', 'SMTP_PASSWORD');
+    // Only identify credentials for selected services
+    if (selectedServices.aiProvider) {
+      const provider = selectedServices.aiProvider.toLowerCase();
+      if (provider.includes('openai') || provider.includes('gpt')) {
+        credentials.push('OPENAI_API_KEY');
+      } else if (provider.includes('claude') || provider.includes('anthropic')) {
+        credentials.push('ANTHROPIC_API_KEY');
+      } else if (provider.includes('gemini') || provider.includes('google')) {
+        credentials.push('GEMINI_API_KEY');
+      } else if (provider.includes('ollama') || provider.includes('local')) {
+        // Ollama doesn't need API key, but might need base URL
+        // No credentials needed for local models
+      }
     }
     
-    // Check requirements arrays
-    if (requirements.apis && requirements.apis.length > 0) {
+    if (selectedServices.outputChannel) {
+      const channel = selectedServices.outputChannel.toLowerCase();
+      if (channel.includes('slack')) {
+        credentials.push('SLACK_TOKEN', 'SLACK_WEBHOOK_URL');
+      } else if (channel.includes('discord')) {
+        credentials.push('DISCORD_WEBHOOK_URL');
+      } else if (channel.includes('email') || channel.includes('smtp')) {
+        credentials.push('SMTP_HOST', 'SMTP_USERNAME', 'SMTP_PASSWORD');
+      }
+    }
+    
+    if (selectedServices.dataSource) {
+      const source = selectedServices.dataSource.toLowerCase();
+      if (source.includes('database') || source.includes('vector database')) {
+        credentials.push('DATABASE_CONNECTION_STRING');
+      } else if (source.includes('google') || source.includes('sheets')) {
+        credentials.push('GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET');
+      }
+    }
+    
+    // Fallback: If no answers provided, use prompt analysis (for backward compatibility)
+    if (!answers || Object.keys(answers).length === 0) {
+      const promptLower = userPrompt.toLowerCase();
+      
+      // Check for AI services in prompt
+      if (promptLower.includes('openai') || promptLower.includes('gpt') || promptLower.includes('chatgpt')) {
+        if (!credentials.includes('OPENAI_API_KEY')) credentials.push('OPENAI_API_KEY');
+      }
+      if (promptLower.includes('claude') || promptLower.includes('anthropic')) {
+        if (!credentials.includes('ANTHROPIC_API_KEY')) credentials.push('ANTHROPIC_API_KEY');
+      }
+      if (promptLower.includes('gemini') || promptLower.includes('google ai')) {
+        if (!credentials.includes('GEMINI_API_KEY')) credentials.push('GEMINI_API_KEY');
+      }
+      
+      // Check for platforms in prompt
+      if (promptLower.includes('slack')) {
+        if (!credentials.includes('SLACK_TOKEN')) credentials.push('SLACK_TOKEN');
+      }
+      if (promptLower.includes('discord')) {
+        if (!credentials.includes('DISCORD_WEBHOOK_URL')) credentials.push('DISCORD_WEBHOOK_URL');
+      }
+      if (promptLower.includes('google') && (promptLower.includes('sheet') || promptLower.includes('gmail') || promptLower.includes('drive'))) {
+        if (!credentials.includes('GOOGLE_OAUTH_CLIENT_ID')) credentials.push('GOOGLE_OAUTH_CLIENT_ID');
+        if (!credentials.includes('GOOGLE_OAUTH_CLIENT_SECRET')) credentials.push('GOOGLE_OAUTH_CLIENT_SECRET');
+      }
+      if (promptLower.includes('email') || promptLower.includes('smtp')) {
+        if (!credentials.includes('SMTP_HOST')) credentials.push('SMTP_HOST');
+        if (!credentials.includes('SMTP_USERNAME')) credentials.push('SMTP_USERNAME');
+        if (!credentials.includes('SMTP_PASSWORD')) credentials.push('SMTP_PASSWORD');
+      }
+    }
+    
+    // Check requirements arrays (only if not already identified from selections)
+    if (requirements.apis && requirements.apis.length > 0 && credentials.length === 0) {
       requirements.apis.forEach(api => {
         const apiLower = api.toLowerCase();
         if (apiLower.includes('openai') || apiLower.includes('gpt')) {
@@ -391,7 +438,7 @@ export class AgenticWorkflowBuilder {
       });
     }
     
-    if (requirements.platforms && requirements.platforms.length > 0) {
+    if (requirements.platforms && requirements.platforms.length > 0 && credentials.length === 0) {
       requirements.platforms.forEach(platform => {
         const platformLower = platform.toLowerCase();
         if (platformLower.includes('slack')) {
@@ -406,57 +453,78 @@ export class AgenticWorkflowBuilder {
       });
     }
     
-    // Use AI to identify additional credentials
-    try {
-      const credentialPrompt = `Analyze this workflow request and identify ALL required API keys, tokens, and credentials needed:
-
-User Request: "${userPrompt}"
-Extracted Requirements: ${JSON.stringify(requirements, null, 2)}
-
-Identify credentials needed for:
-- AI services (OpenAI, Anthropic, Gemini)
-- Communication platforms (Slack, Discord, Email/SMTP)
-- Google services (Sheets, Gmail, Drive)
-- Any other APIs or services mentioned
-
-Return JSON array of credential names:
-["CREDENTIAL_NAME_1", "CREDENTIAL_NAME_2", ...]
-
-Use standard names like: OPENAI_API_KEY, SLACK_TOKEN, GOOGLE_OAUTH_CLIENT_ID, etc.`;
-
-      const result = await ollamaOrchestrator.processRequest('workflow-generation', {
-        prompt: credentialPrompt,
-        temperature: 0.2,
-      });
-      
-      let parsed: string[] = [];
-      try {
-        const jsonText = typeof result === 'string' ? result : JSON.stringify(result);
-        let cleanJson = jsonText.trim();
-        
-        if (cleanJson.includes('```json')) {
-          cleanJson = cleanJson.split('```json')[1].split('```')[0].trim();
-        } else if (cleanJson.includes('```')) {
-          cleanJson = cleanJson.split('```')[1].split('```')[0].trim();
-        }
-        
-        parsed = JSON.parse(cleanJson);
-        if (Array.isArray(parsed)) {
-          // Merge with existing credentials, removing duplicates
-          parsed.forEach(cred => {
-            if (!credentials.includes(cred)) {
-              credentials.push(cred);
-            }
-          });
-        }
-      } catch (parseError) {
-        console.warn('Failed to parse AI-identified credentials, using inferred ones');
-      }
-    } catch (error) {
-      console.warn('Error identifying credentials with AI, using inferred ones:', error);
-    }
-    
     return [...new Set(credentials)]; // Remove duplicates
+  }
+
+  /**
+   * Extract selected services from user answers
+   * Looks for node selection answers and maps them to service types
+   */
+  private extractSelectedServices(answers: Record<string, string>): {
+    aiProvider?: string;
+    dataSource?: string;
+    outputChannel?: string;
+    trigger?: string;
+  } {
+    const selections: {
+      aiProvider?: string;
+      dataSource?: string;
+      outputChannel?: string;
+      trigger?: string;
+    } = {};
+    
+    // Search through answers for service selections
+    Object.entries(answers).forEach(([questionId, answer]) => {
+      const answerLower = answer.toLowerCase();
+      
+      // Check for AI provider selection
+      if (answerLower.includes('openai') || answerLower.includes('gpt')) {
+        selections.aiProvider = 'OpenAI';
+      } else if (answerLower.includes('claude') || answerLower.includes('anthropic')) {
+        selections.aiProvider = 'Anthropic';
+      } else if (answerLower.includes('gemini')) {
+        selections.aiProvider = 'Gemini';
+      } else if (answerLower.includes('ollama') || answerLower.includes('local')) {
+        selections.aiProvider = 'Ollama';
+      }
+      
+      // Check for output channel selection
+      if (answerLower.includes('slack')) {
+        selections.outputChannel = 'Slack';
+      } else if (answerLower.includes('discord')) {
+        selections.outputChannel = 'Discord';
+      } else if (answerLower.includes('email') || answerLower.includes('smtp')) {
+        selections.outputChannel = 'Email';
+      } else if (answerLower.includes('webhook')) {
+        selections.outputChannel = 'Webhook';
+      }
+      
+      // Check for data source selection
+      if (answerLower.includes('database') || answerLower.includes('vector')) {
+        selections.dataSource = 'Database';
+      } else if (answerLower.includes('faq') || answerLower.includes('files')) {
+        selections.dataSource = 'Files';
+      } else if (answerLower.includes('api')) {
+        selections.dataSource = 'API';
+      } else if (answerLower.includes('google') || answerLower.includes('sheets')) {
+        selections.dataSource = 'Google';
+      }
+      
+      // Check for trigger selection
+      if (answerLower.includes('webhook')) {
+        selections.trigger = 'Webhook';
+      } else if (answerLower.includes('slack')) {
+        selections.trigger = 'Slack';
+      } else if (answerLower.includes('discord')) {
+        selections.trigger = 'Discord';
+      } else if (answerLower.includes('schedule') || answerLower.includes('scheduled')) {
+        selections.trigger = 'Schedule';
+      } else if (answerLower.includes('manual')) {
+        selections.trigger = 'Manual';
+      }
+    });
+    
+    return selections;
   }
 
   /**
@@ -1319,7 +1387,7 @@ Return JSON:
     // Get node schema from NodeLibrary for better configuration
     const nodeSchema = nodeLibrary.getSchema(node.type);
     
-    const config: Record<string, unknown> = {};
+    let config: Record<string, unknown> = {};
     
     // Extract values from configValues (user-provided credentials/URLs)
     const getConfigValue = (key: string, fallback?: any): any => {

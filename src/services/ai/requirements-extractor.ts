@@ -120,20 +120,27 @@ Original User Prompt: "${userPrompt}"
 
     prompt += `Extract the following requirements:
 
+IMPORTANT: If user answers are provided, ONLY extract credentials for services that the user has SELECTED in their answers.
+For example, if user selected "OpenAI GPT" in their answers, extract "OpenAI API Key" but NOT "Anthropic API Key" or "Gemini API Key".
+
 1. URLs & API Endpoints:
    - Any URLs mentioned (API endpoints, webhooks, services)
    - Extract from text or infer from service names
    - Format: ["https://api.example.com", "https://webhook.example.com"]
 
 2. APIs & Services:
-   - Service names (Twitter, Slack, Google Sheets, etc.)
+   - Service names based on user selections (if answers provided) or from prompt
+   - Only include services that user has explicitly selected
    - API types (REST, GraphQL, Webhook)
-   - Format: ["Twitter API", "Slack API", "Google Sheets API"]
+   - Format: ["OpenAI API", "Slack API", "Google Sheets API"]
 
 3. Credentials Required:
-   - Authentication methods needed
+   - ONLY extract credentials for services that user has SELECTED
+   - If user selected "OpenAI GPT" → extract "OpenAI API Key" only
+   - If user selected "Slack" → extract "Slack Bot Token" only
+   - Authentication methods needed for selected services only
    - Service credentials (API keys, OAuth, etc.)
-   - Format: ["Twitter API Key", "Slack Bot Token", "Database Credentials"]
+   - Format: ["OpenAI API Key", "Slack Bot Token", "Database Credentials"]
 
 4. Schedules:
    - Time-based triggers (daily, hourly, cron expressions)

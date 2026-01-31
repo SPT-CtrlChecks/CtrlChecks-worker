@@ -206,6 +206,10 @@ export class LLMAdapter {
   ): Promise<LLMResponse> {
     const apiKey = options.apiKey || process.env.OPENAI_API_KEY;
     if (!apiKey) {
+      // Prioritize user-provided config over environment variables
+      if (!options.apiKey) {
+        throw new Error('OpenAI API key required. Please provide your API key in the node properties (API Key field).');
+      }
       throw new Error('OpenAI API key required. Provide apiKey in options or set OPENAI_API_KEY environment variable.');
     }
 
@@ -291,6 +295,10 @@ export class LLMAdapter {
   ): Promise<LLMResponse> {
     const apiKey = options.apiKey || process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
+      // Prioritize user-provided config over environment variables
+      if (!options.apiKey) {
+        throw new Error('Anthropic API key required. Please provide your API key in the node properties (API Key field).');
+      }
       throw new Error('Anthropic API key required. Provide apiKey in options or set ANTHROPIC_API_KEY environment variable.');
     }
 
@@ -388,6 +396,10 @@ export class LLMAdapter {
   ): Promise<LLMResponse> {
     const apiKey = options.apiKey || process.env.GEMINI_API_KEY;
     if (!apiKey) {
+      // Prioritize user-provided config over environment variables
+      if (!options.apiKey) {
+        throw new Error('Gemini API key required. Please provide your API key in the node properties (API Key field).');
+      }
       throw new Error('Gemini API key required. Provide apiKey in options or set GEMINI_API_KEY environment variable.');
     }
 
