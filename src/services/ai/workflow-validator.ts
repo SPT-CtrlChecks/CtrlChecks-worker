@@ -86,8 +86,28 @@ export class WorkflowValidator {
   /**
    * Validate workflow and attempt auto-fix
    */
-  async validateAndFix(workflow: Workflow): Promise<ValidationResult> {
-    console.log(`🔍 Validating workflow with ${workflow.nodes.length} nodes...`);
+  async validateAndFix(workflow: Workflow, depth: number = 0): Promise<ValidationResult> {
+    // Prevent infinite recursion
+    if (depth >= this.maxFixIterations) {
+      console.warn(`⚠️  Max fix iterations (${this.maxFixIterations}) reached. Stopping validation to prevent infinite loop.`);
+      const result: ValidationResult = {
+        valid: false,
+        errors: [{
+          type: 'invalid_configuration',
+          message: `Validation stopped after ${this.maxFixIterations} fix iterations to prevent infinite loop`,
+          severity: 'high',
+          fixable: false,
+        }],
+        warnings: [],
+        fixesApplied: [],
+      };
+      return result;
+    }
+
+    // Only log first iteration to reduce console spam
+    if (depth === 0) {
+      console.log(`🔍 Validating workflow with ${workflow.nodes.length} nodes...`);
+    }
 
     const result: ValidationResult = {
       valid: false,
@@ -101,15 +121,22 @@ export class WorkflowValidator {
     this.validateConfiguration(workflow, result);
     this.validateBusinessLogic(workflow, result);
 
-    // Attempt auto-fix if there are fixable errors
-    if (result.errors.some(e => e.fixable)) {
+    // Attempt auto-fix if there are fixable errors and we haven't exceeded max iterations
+    if (result.errors.some(e => e.fixable) && depth < this.maxFixIterations) {
       const fixed = await this.attemptAutoFix(workflow, result);
-      if (fixed) {
+      if (fixed && result.fixesApplied.length > 0) {
         result.fixedWorkflow = fixed;
-        // Re-validate fixed workflow
-        const revalidation = await this.validateAndFix(fixed);
+        // Re-validate fixed workflow with incremented depth
+        const revalidation = await this.validateAndFix(fixed, depth + 1);
         result.errors = revalidation.errors;
         result.warnings = revalidation.warnings;
+        // Merge fixes applied (avoid duplicates)
+        const existingFixDescriptions = new Set(result.fixesApplied.map(f => f.description));
+        revalidation.fixesApplied.forEach(fix => {
+          if (!existingFixDescriptions.has(fix.description)) {
+            result.fixesApplied.push(fix);
+          }
+        });
       }
     }
 
