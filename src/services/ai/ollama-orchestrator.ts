@@ -411,6 +411,17 @@ Respond with JSON: { "intent": "...", "confidence": 0.0-1.0, "entities": [], "re
 ${input.text}`;
       
       case 'workflow-generation':
+        // If prompt is already a full prompt (with few-shot examples), use it directly
+        // Otherwise, build a simple prompt
+        if (typeof input === 'string' && input.length > 200) {
+          // Likely a full prompt with examples
+          return input;
+        }
+        if (input.prompt && typeof input.prompt === 'string' && input.prompt.length > 200) {
+          // Full prompt provided
+          return input.prompt;
+        }
+        // Simple prompt for basic requests
         return `Generate a workflow based on this requirement: ${input.prompt || input}`;
       
       case 'error-analysis':

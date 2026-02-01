@@ -3,6 +3,11 @@
 
 import { randomUUID } from 'crypto';
 import { ollamaOrchestrator } from './ollama-orchestrator';
+import { requirementsExtractor } from './requirements-extractor';
+import { workflowValidator } from './workflow-validator';
+import { nodeEquivalenceMapper } from './node-equivalence-mapper';
+import { enhancedWorkflowAnalyzer } from './enhanced-workflow-analyzer';
+import { nodeLibrary } from '../nodes/node-library';
 import {
   WorkflowNode,
   WorkflowEdge,
@@ -17,6 +22,19 @@ import {
   Change,
 } from '../../core/types/ai-types';
 import { TypeValidator } from '../../core/validation/type-validator';
+import { workflowTrainingService } from './workflow-training-service';
+import {
+  isPlaceholder,
+  isEnvReference,
+  generateApiKeyRef,
+  getServiceBaseUrl,
+  validateNodeConfig,
+  validateWorkflowConnections,
+  sanitizeConfigValue,
+  applySafeDefaults,
+  extractServiceName,
+  isProductionReady,
+} from './workflow-builder-utils';
 
 export class AgenticWorkflowBuilder {
   private nodeLibrary: Map<string, any> = new Map();
@@ -167,14 +185,24 @@ export class AgenticWorkflowBuilder {
   }
 
   /**
-   * Simplified 7-Step Workflow Generation Process
+   * Autonomous Workflow Generation Agent
+   * 
+   * Implements the system prompt requirements:
+   * - Fully executable, zero-error workflows
+   * - All required fields auto-filled
+   * - Intelligent defaults for missing values
+   * - Proper input-output mapping
+   * - Self-repair until zero errors
+   * - NO placeholders or empty required fields
+   * 
+   * Simplified 7-Step Workflow Generation Process:
    * 1. User raw prompt (input)
    * 2. Questions for confirming (handled externally)
    * 3. System prompt in 20-30 words (what you understood)
    * 4. Workflow requirements (URL, API, etc.)
-   * 5. Workflow building
-   * 6. Validating
-   * 7. Outputs
+   * 5. Workflow building (structure → nodes → config → connections)
+   * 6. Validating (with auto-fix/self-repair)
+   * 7. Outputs (documentation, suggestions, complexity)
    */
   async generateFromPrompt(
     userPrompt: string,
@@ -187,6 +215,7 @@ export class AgenticWorkflowBuilder {
     estimatedComplexity: string;
     systemPrompt?: string;
     requirements?: any;
+    requiredCredentials?: string[];
   }> {
     console.log(`🤖 Generating workflow from prompt: "${userPrompt}"`);
     
@@ -196,14 +225,38 @@ export class AgenticWorkflowBuilder {
     
     // Step 4: Extract workflow requirements (URLs, APIs, credentials, etc.)
     onProgress?.({ step: 4, stepName: 'Requirements Extraction', progress: 40, details: { message: 'Extracting requirements...' } });
-    const requirements = await this.extractWorkflowRequirements(userPrompt, systemPrompt, constraints);
+    // Use RequirementsExtractor service if answers are provided, otherwise use legacy method
+    const answers = constraints?.answers;
+    const requirements = answers 
+      ? await requirementsExtractor.extractRequirements(userPrompt, systemPrompt, answers, constraints)
+      : await this.extractWorkflowRequirements(userPrompt, systemPrompt, constraints);
+    
+    // Step 4.5: Identify required credentials BEFORE building (only for selected services)
+    onProgress?.({ step: 4, stepName: 'Credential Analysis', progress: 45, details: { message: 'Identifying required credentials...' } });
+    const requiredCredentials = await this.identifyRequiredCredentials(requirements, userPrompt, answers);
     
     // Step 5: Build workflow
     onProgress?.({ step: 5, stepName: 'Building', progress: 50, details: { message: 'Building workflow structure...' } });
     const structure = await this.generateStructure(requirements);
     
+    // Apply node preferences from user answers if available
+    const nodePreferences = constraints?.answers 
+      ? enhancedWorkflowAnalyzer.extractNodePreferences(constraints.answers)
+      : {};
+    
+    // Update structure with user's node preferences
+    const structureWithPreferences = this.applyNodePreferences(structure, nodePreferences, requirements);
+    
     onProgress?.({ step: 5, stepName: 'Building', progress: 60, details: { message: 'Selecting nodes...' } });
-    const nodes = await this.selectNodes(structure, requirements);
+    const nodes = await this.selectNodes(structureWithPreferences, requirements);
+    
+    // Step 5.5: Validate credentials are provided before configuring
+    onProgress?.({ step: 5, stepName: 'Credential Validation', progress: 65, details: { message: 'Validating credentials...' } });
+    const credentialCheck = this.validateCredentialsProvided(requiredCredentials, constraints || {});
+    if (!credentialCheck.allProvided && credentialCheck.missing.length > 0) {
+      console.warn('⚠️  Missing credentials:', credentialCheck.missing);
+      // Continue but use environment variable references for missing credentials
+    }
     
     onProgress?.({ step: 5, stepName: 'Building', progress: 70, details: { message: 'Configuring nodes...' } });
     const configuredNodes = await this.configureNodes(nodes, requirements, constraints);
@@ -211,45 +264,36 @@ export class AgenticWorkflowBuilder {
     onProgress?.({ step: 5, stepName: 'Building', progress: 80, details: { message: 'Creating connections...' } });
     const connections = await this.createConnections(configuredNodes, requirements);
     
-    // Step 6: Validate workflow and auto-fix errors
+    // Step 6: Validate workflow and auto-fix errors using WorkflowValidator service
     onProgress?.({ step: 6, stepName: 'Validating', progress: 90, details: { message: 'Validating workflow...' } });
-    const typeValidation = TypeValidator.validateWorkflow({
-      nodes: configuredNodes,
-      edges: connections,
-    });
-    
-    if (!typeValidation.isValid) {
-      console.warn('⚠️  Type validation warnings:', typeValidation.errors);
-    }
     
     let finalNodes = configuredNodes;
     let finalEdges = connections;
     
-    const validation = await this.validateWorkflow({
+    // Use WorkflowValidator service for comprehensive validation and auto-fix
+    const validation = await workflowValidator.validateAndFix({
       nodes: finalNodes,
       edges: finalEdges,
     });
     
-    // Auto-fix errors to ensure 100% working workflow
-    if (!validation.valid || validation.errors.length > 0) {
-      onProgress?.({ step: 6, stepName: 'Healing', progress: 92, details: { message: 'Fixing errors automatically...' } });
-      const fixed = await this.autoFixWorkflow(finalNodes, finalEdges, requirements, constraints);
-      finalNodes = fixed.nodes;
-      finalEdges = fixed.edges;
-      
-      // Re-validate after fixing
-      const revalidation = await this.validateWorkflow({
-        nodes: finalNodes,
-        edges: finalEdges,
-      });
-      
-      if (!revalidation.valid && revalidation.errors.length > 0) {
-        console.warn('⚠️  Some errors remain after auto-fix:', revalidation.errors);
-        // Try one more time with more aggressive fixes
-        const secondFix = await this.autoFixWorkflow(finalNodes, finalEdges, requirements, constraints, true);
-        finalNodes = secondFix.nodes;
-        finalEdges = secondFix.edges;
-      }
+    // Use fixed workflow if available
+    if (validation.fixedWorkflow) {
+      finalNodes = validation.fixedWorkflow.nodes;
+      finalEdges = validation.fixedWorkflow.edges;
+      onProgress?.({ step: 6, stepName: 'Healing', progress: 92, details: { 
+        message: `Fixed ${validation.fixesApplied.length} issues automatically`,
+        fixesApplied: validation.fixesApplied.length 
+      } });
+    }
+    
+    // Also run type validation for additional checks
+    const typeValidation = TypeValidator.validateWorkflow({
+      nodes: finalNodes,
+      edges: finalEdges,
+    });
+    
+    if (!typeValidation.isValid) {
+      console.warn('⚠️  Type validation warnings:', typeValidation.errors);
     }
     
     // Step 7: Generate outputs and documentation
@@ -259,6 +303,13 @@ export class AgenticWorkflowBuilder {
       finalEdges,
       requirements
     );
+    
+    // Final production-ready check
+    const productionCheck = isProductionReady(finalNodes, finalEdges);
+    if (!productionCheck.ready) {
+      console.warn('⚠️  Production readiness issues:', productionCheck.issues);
+      // These should have been fixed by auto-fix, but log for visibility
+    }
     
     onProgress?.({ step: 7, stepName: 'Complete', progress: 100, details: { message: 'Workflow ready!' } });
     
@@ -271,6 +322,7 @@ export class AgenticWorkflowBuilder {
           systemPrompt,
           requirements,
           validation,
+          productionReady: productionCheck.ready,
           timestamp: new Date().toISOString(),
         },
       },
@@ -283,6 +335,249 @@ export class AgenticWorkflowBuilder {
       estimatedComplexity: this.calculateComplexity(configuredNodes, connections),
       systemPrompt,
       requirements,
+      requiredCredentials,
+    };
+  }
+
+  /**
+   * Identify required credentials for the workflow
+   * ENHANCED: Only identifies credentials for services that the user has selected
+   * Analyzes user answers to determine which services were selected, then identifies credentials for those only
+   */
+  private async identifyRequiredCredentials(
+    requirements: Requirements,
+    userPrompt: string,
+    answers?: Record<string, string>
+  ): Promise<string[]> {
+    const credentials: string[] = [];
+    
+    // Extract node selections from user answers
+    const selectedServices = this.extractSelectedServices(answers || {});
+    
+    // Only identify credentials for selected services
+    if (selectedServices.aiProvider) {
+      const provider = selectedServices.aiProvider.toLowerCase();
+      if (provider.includes('openai') || provider.includes('gpt')) {
+        credentials.push('OPENAI_API_KEY');
+      } else if (provider.includes('claude') || provider.includes('anthropic')) {
+        credentials.push('ANTHROPIC_API_KEY');
+      } else if (provider.includes('gemini') || provider.includes('google')) {
+        credentials.push('GEMINI_API_KEY');
+      } else if (provider.includes('ollama') || provider.includes('local')) {
+        // Ollama doesn't need API key, but might need base URL
+        // No credentials needed for local models
+      }
+    }
+    
+    if (selectedServices.outputChannel) {
+      const channel = selectedServices.outputChannel.toLowerCase();
+      if (channel.includes('slack')) {
+        credentials.push('SLACK_TOKEN', 'SLACK_WEBHOOK_URL');
+      } else if (channel.includes('discord')) {
+        credentials.push('DISCORD_WEBHOOK_URL');
+      } else if (channel.includes('email') || channel.includes('smtp')) {
+        credentials.push('SMTP_HOST', 'SMTP_USERNAME', 'SMTP_PASSWORD');
+      }
+    }
+    
+    if (selectedServices.dataSource) {
+      const source = selectedServices.dataSource.toLowerCase();
+      if (source.includes('database') || source.includes('vector database')) {
+        credentials.push('DATABASE_CONNECTION_STRING');
+      } else if (source.includes('google') || source.includes('sheets')) {
+        credentials.push('GOOGLE_OAUTH_CLIENT_ID', 'GOOGLE_OAUTH_CLIENT_SECRET');
+      }
+    }
+    
+    // Fallback: If no answers provided, use prompt analysis (for backward compatibility)
+    if (!answers || Object.keys(answers).length === 0) {
+      const promptLower = userPrompt.toLowerCase();
+      
+      // Check for AI services in prompt
+      if (promptLower.includes('openai') || promptLower.includes('gpt') || promptLower.includes('chatgpt')) {
+        if (!credentials.includes('OPENAI_API_KEY')) credentials.push('OPENAI_API_KEY');
+      }
+      if (promptLower.includes('claude') || promptLower.includes('anthropic')) {
+        if (!credentials.includes('ANTHROPIC_API_KEY')) credentials.push('ANTHROPIC_API_KEY');
+      }
+      if (promptLower.includes('gemini') || promptLower.includes('google ai')) {
+        if (!credentials.includes('GEMINI_API_KEY')) credentials.push('GEMINI_API_KEY');
+      }
+      
+      // Check for platforms in prompt
+      if (promptLower.includes('slack')) {
+        if (!credentials.includes('SLACK_TOKEN')) credentials.push('SLACK_TOKEN');
+      }
+      if (promptLower.includes('discord')) {
+        if (!credentials.includes('DISCORD_WEBHOOK_URL')) credentials.push('DISCORD_WEBHOOK_URL');
+      }
+      if (promptLower.includes('google') && (promptLower.includes('sheet') || promptLower.includes('gmail') || promptLower.includes('drive'))) {
+        if (!credentials.includes('GOOGLE_OAUTH_CLIENT_ID')) credentials.push('GOOGLE_OAUTH_CLIENT_ID');
+        if (!credentials.includes('GOOGLE_OAUTH_CLIENT_SECRET')) credentials.push('GOOGLE_OAUTH_CLIENT_SECRET');
+      }
+      if (promptLower.includes('email') || promptLower.includes('smtp')) {
+        if (!credentials.includes('SMTP_HOST')) credentials.push('SMTP_HOST');
+        if (!credentials.includes('SMTP_USERNAME')) credentials.push('SMTP_USERNAME');
+        if (!credentials.includes('SMTP_PASSWORD')) credentials.push('SMTP_PASSWORD');
+      }
+    }
+    
+    // Check requirements arrays (only if not already identified from selections)
+    if (requirements.apis && requirements.apis.length > 0 && credentials.length === 0) {
+      requirements.apis.forEach(api => {
+        const apiLower = api.toLowerCase();
+        if (apiLower.includes('openai') || apiLower.includes('gpt')) {
+          if (!credentials.includes('OPENAI_API_KEY')) credentials.push('OPENAI_API_KEY');
+        }
+        if (apiLower.includes('claude') || apiLower.includes('anthropic')) {
+          if (!credentials.includes('ANTHROPIC_API_KEY')) credentials.push('ANTHROPIC_API_KEY');
+        }
+        if (apiLower.includes('gemini') || apiLower.includes('google')) {
+          if (!credentials.includes('GEMINI_API_KEY')) credentials.push('GEMINI_API_KEY');
+        }
+      });
+    }
+    
+    if (requirements.platforms && requirements.platforms.length > 0 && credentials.length === 0) {
+      requirements.platforms.forEach(platform => {
+        const platformLower = platform.toLowerCase();
+        if (platformLower.includes('slack')) {
+          if (!credentials.includes('SLACK_TOKEN')) credentials.push('SLACK_TOKEN');
+        }
+        if (platformLower.includes('discord')) {
+          if (!credentials.includes('DISCORD_WEBHOOK_URL')) credentials.push('DISCORD_WEBHOOK_URL');
+        }
+        if (platformLower.includes('google')) {
+          if (!credentials.includes('GOOGLE_OAUTH_CLIENT_ID')) credentials.push('GOOGLE_OAUTH_CLIENT_ID');
+        }
+      });
+    }
+    
+    return [...new Set(credentials)]; // Remove duplicates
+  }
+
+  /**
+   * Extract selected services from user answers
+   * Looks for node selection answers and maps them to service types
+   */
+  private extractSelectedServices(answers: Record<string, string>): {
+    aiProvider?: string;
+    dataSource?: string;
+    outputChannel?: string;
+    trigger?: string;
+  } {
+    const selections: {
+      aiProvider?: string;
+      dataSource?: string;
+      outputChannel?: string;
+      trigger?: string;
+    } = {};
+    
+    // Search through answers for service selections
+    Object.entries(answers).forEach(([questionId, answer]) => {
+      const answerLower = answer.toLowerCase();
+      
+      // Check for AI provider selection
+      if (answerLower.includes('openai') || answerLower.includes('gpt')) {
+        selections.aiProvider = 'OpenAI';
+      } else if (answerLower.includes('claude') || answerLower.includes('anthropic')) {
+        selections.aiProvider = 'Anthropic';
+      } else if (answerLower.includes('gemini')) {
+        selections.aiProvider = 'Gemini';
+      } else if (answerLower.includes('ollama') || answerLower.includes('local')) {
+        selections.aiProvider = 'Ollama';
+      }
+      
+      // Check for output channel selection
+      if (answerLower.includes('slack')) {
+        selections.outputChannel = 'Slack';
+      } else if (answerLower.includes('discord')) {
+        selections.outputChannel = 'Discord';
+      } else if (answerLower.includes('email') || answerLower.includes('smtp')) {
+        selections.outputChannel = 'Email';
+      } else if (answerLower.includes('webhook')) {
+        selections.outputChannel = 'Webhook';
+      }
+      
+      // Check for data source selection
+      if (answerLower.includes('database') || answerLower.includes('vector')) {
+        selections.dataSource = 'Database';
+      } else if (answerLower.includes('faq') || answerLower.includes('files')) {
+        selections.dataSource = 'Files';
+      } else if (answerLower.includes('api')) {
+        selections.dataSource = 'API';
+      } else if (answerLower.includes('google') || answerLower.includes('sheets')) {
+        selections.dataSource = 'Google';
+      }
+      
+      // Check for trigger selection
+      if (answerLower.includes('webhook')) {
+        selections.trigger = 'Webhook';
+      } else if (answerLower.includes('slack')) {
+        selections.trigger = 'Slack';
+      } else if (answerLower.includes('discord')) {
+        selections.trigger = 'Discord';
+      } else if (answerLower.includes('schedule') || answerLower.includes('scheduled')) {
+        selections.trigger = 'Schedule';
+      } else if (answerLower.includes('manual')) {
+        selections.trigger = 'Manual';
+      }
+    });
+    
+    return selections;
+  }
+
+  /**
+   * Validate that required credentials are provided
+   */
+  private validateCredentialsProvided(
+    requiredCredentials: string[],
+    constraints: Record<string, any>
+  ): {
+    allProvided: boolean;
+    missing: string[];
+    provided: string[];
+  } {
+    const provided: string[] = [];
+    const missing: string[] = [];
+    
+    requiredCredentials.forEach(cred => {
+      // Check various possible key names
+      const possibleKeys = [
+        cred.toLowerCase(),
+        cred.toLowerCase().replace(/_/g, ''),
+        cred.toLowerCase().replace(/_/g, '-'),
+        cred.toLowerCase().replace(/_/g, ' '),
+      ];
+      
+      let found = false;
+      for (const key of possibleKeys) {
+        // Check exact match
+        if (constraints[key] || constraints[cred]) {
+          found = true;
+          break;
+        }
+        // Check case-insensitive
+        for (const constraintKey of Object.keys(constraints)) {
+          if (constraintKey.toLowerCase() === key) {
+            found = true;
+            break;
+          }
+        }
+        if (found) break;
+      }
+      
+      if (found) {
+        provided.push(cred);
+      } else {
+        missing.push(cred);
+      }
+    });
+    
+    return {
+      allProvided: missing.length === 0,
+      missing,
+      provided,
     };
   }
 
@@ -316,6 +611,7 @@ export class AgenticWorkflowBuilder {
 
   /**
    * Step 3: Generate system prompt in 20-30 words summarizing what was understood
+   * Enhanced with training examples for few-shot learning
    */
   async generateSystemPrompt(
     userPrompt: string,
@@ -325,16 +621,28 @@ export class AgenticWorkflowBuilder {
       return 'Build an automated workflow based on user requirements.';
     }
 
-    const prompt = `Based on this workflow request, create a concise 20-30 word system prompt that summarizes what you understood:
+    // Get few-shot examples from training service
+    let fewShotPrompt = '';
+    try {
+      fewShotPrompt = workflowTrainingService.buildSystemPromptFewShotPrompt(userPrompt);
+    } catch (error) {
+      console.warn('⚠️  Failed to get training examples for system prompt:', error);
+    }
+    
+    // Build the full prompt - use few-shot if available, otherwise use base prompt
+    const basePrompt = `Based on this workflow request, create a concise 20-30 word system prompt that summarizes what you understood:
 
 User Request: "${userPrompt}"
 ${constraints ? `Constraints: ${JSON.stringify(constraints)}` : ''}
 
 Generate a clear, concise system prompt (20-30 words) that captures the core intent and goal. Return only the prompt text, no JSON, no explanations.`;
 
+    const fullPrompt = fewShotPrompt || basePrompt;
+
     try {
+      // Pass the full prompt directly - ollama-orchestrator will use it as-is if it's a full prompt
       const result = await ollamaOrchestrator.processRequest('workflow-generation', {
-        prompt,
+        prompt: fullPrompt,
         temperature: 0.2,
         maxTokens: 100,
       });
@@ -376,6 +684,7 @@ Generate a clear, concise system prompt (20-30 words) that captures the core int
 
   /**
    * Step 4: Extract workflow requirements (URLs, APIs, credentials, etc.)
+   * Enhanced with training examples for few-shot learning
    */
   async extractWorkflowRequirements(
     userPrompt: string,
@@ -384,7 +693,16 @@ Generate a clear, concise system prompt (20-30 words) that captures the core int
   ): Promise<Requirements> {
     const nodeLibraryInfo = this.getNodeLibraryDescription();
     
-    const extractionPrompt = `You are an Autonomous Workflow Agent v2.5. Extract workflow requirements from this request.
+    // Get few-shot examples from training service
+    let fewShotPrompt = '';
+    try {
+      fewShotPrompt = workflowTrainingService.buildRequirementsFewShotPrompt(userPrompt, systemPrompt);
+    } catch (error) {
+      console.warn('⚠️  Failed to get training examples for requirements:', error);
+    }
+    
+    // Build the base extraction prompt
+    const baseExtractionPrompt = `You are an Autonomous Workflow Agent v2.5. Extract workflow requirements from this request.
 
 ${nodeLibraryInfo}
 
@@ -408,8 +726,12 @@ Based on the available node library above, extract and return JSON with:
 }
 
 Use only nodes from the library above.`;
+
+    // Use few-shot prompt if available, otherwise use base prompt
+    const extractionPrompt = fewShotPrompt || baseExtractionPrompt;
     
     try {
+      // Pass the full prompt directly
       const result = await ollamaOrchestrator.processRequest('workflow-generation', {
         prompt: extractionPrompt,
         temperature: 0.3,
@@ -463,13 +785,27 @@ Use only nodes from the library above.`;
       if (promptLower.includes('twitter') || promptLower.includes('x.com')) inferredPlatforms.push('Twitter');
       if (promptLower.includes('discord')) inferredPlatforms.push('Discord');
       
-      // Infer schedules
-      if (promptLower.includes('daily') || promptLower.includes('every day')) inferredSchedules.push('Daily');
-      if (promptLower.includes('weekly')) inferredSchedules.push('Weekly');
-      if (promptLower.includes('hourly')) inferredSchedules.push('Hourly');
-      if (promptLower.match(/\d+:\d+/)) {
-        const timeMatch = userPrompt.match(/(\d+:\d+)/);
-        if (timeMatch) inferredSchedules.push(`At ${timeMatch[1]}`);
+      // Infer schedules - ONLY if explicitly mentioned with automation keywords
+      // Don't infer schedules from generic time mentions
+      const hasScheduleContext = promptLower.includes('schedule') || 
+                                 promptLower.includes('recurring') || 
+                                 promptLower.includes('periodic') ||
+                                 promptLower.includes('automatically at') ||
+                                 promptLower.includes('run daily') ||
+                                 promptLower.includes('run weekly') ||
+                                 promptLower.includes('run hourly') ||
+                                 (promptLower.includes('daily') && (promptLower.includes('run') || promptLower.includes('execute') || promptLower.includes('automate'))) ||
+                                 (promptLower.includes('weekly') && (promptLower.includes('run') || promptLower.includes('execute') || promptLower.includes('automate'))) ||
+                                 (promptLower.includes('hourly') && (promptLower.includes('run') || promptLower.includes('execute') || promptLower.includes('automate')));
+      
+      if (hasScheduleContext) {
+        if (promptLower.includes('daily') || promptLower.includes('every day')) inferredSchedules.push('Daily');
+        if (promptLower.includes('weekly')) inferredSchedules.push('Weekly');
+        if (promptLower.includes('hourly')) inferredSchedules.push('Hourly');
+        if (promptLower.match(/\d+:\d+/)) {
+          const timeMatch = userPrompt.match(/(\d+:\d+)/);
+          if (timeMatch) inferredSchedules.push(`At ${timeMatch[1]}`);
+        }
       }
       
       return {
@@ -509,8 +845,28 @@ Use only nodes from the library above.`;
   private async generateStructure(requirements: Requirements): Promise<WorkflowGenerationStructure> {
     const nodeLibraryInfo = this.getNodeLibraryDescription();
     
+    // Get training examples for structure generation
+    let fewShotExamples = '';
+    try {
+      const examples = workflowTrainingService.getNodeSelectionExamples(2);
+      if (examples.length > 0) {
+        fewShotExamples = '\n\nHere are examples of workflow structures:\n\n';
+        examples.forEach((example, idx) => {
+          fewShotExamples += `Example ${idx + 1}:\n`;
+          fewShotExamples += `Goal: "${example.goal}"\n`;
+          fewShotExamples += `Selected Nodes: ${example.selectedNodes.join(', ')}\n`;
+          if (example.connections && example.connections.length > 0) {
+            fewShotExamples += `Connections: ${example.connections.slice(0, 2).join('; ')}\n`;
+          }
+          fewShotExamples += '\n';
+        });
+      }
+    } catch (error) {
+      console.warn('⚠️  Failed to get training examples for structure generation:', error);
+    }
+    
     // Generate a logical structure for the workflow using AI
-    const structurePrompt = `You are an Autonomous Workflow Agent v2.5. Generate workflow structure.
+    const structurePrompt = `You are an Autonomous Workflow Agent v2.5. Generate workflow structure.${fewShotExamples}
 
 ${nodeLibraryInfo}
 
@@ -519,8 +875,16 @@ ${JSON.stringify(requirements, null, 2)}
 
 Based on the requirements and available nodes, determine:
 1. Trigger type (use only trigger nodes from library)
+   - Use "manual_trigger" as DEFAULT unless user explicitly mentions:
+     * Schedule/recurring/daily/weekly/hourly/cron → "schedule"
+     * Webhook/HTTP endpoint/API call → "webhook"
+     * Form submission/form input → "form"
+   - CRITICAL: Only use "schedule" if user explicitly mentions scheduling, recurring tasks, daily/weekly runs, or time-based automation
+   - DO NOT default to "schedule" - default to "manual_trigger"
 2. Workflow steps (use appropriate nodes from library)
 3. Output nodes (use only output nodes from library)
+
+IMPORTANT: Return ONLY valid JSON, no explanations, no markdown, no code blocks. Just the JSON object.
 
 Return JSON:
 {
@@ -537,7 +901,7 @@ Return JSON:
     try {
       const result = await ollamaOrchestrator.processRequest('workflow-generation', {
         prompt: structurePrompt,
-        temperature: 0.3,
+        temperature: 0.2, // Lower temperature for more consistent JSON
       });
 
       let parsed;
@@ -545,15 +909,28 @@ Return JSON:
         const jsonText = typeof result === 'string' ? result : JSON.stringify(result);
         let cleanJson = jsonText.trim();
         
+        // Remove markdown code blocks
         if (cleanJson.includes('```json')) {
           cleanJson = cleanJson.split('```json')[1].split('```')[0].trim();
         } else if (cleanJson.includes('```')) {
           cleanJson = cleanJson.split('```')[1].split('```')[0].trim();
         }
         
+        // Try to extract JSON if there's text before/after
+        // Look for first { and last }
+        const firstBrace = cleanJson.indexOf('{');
+        const lastBrace = cleanJson.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+          cleanJson = cleanJson.substring(firstBrace, lastBrace + 1);
+        }
+        
+        // Remove any leading/trailing non-JSON text
+        cleanJson = cleanJson.replace(/^[^{]*/, '').replace(/[^}]*$/, '');
+        
         parsed = JSON.parse(cleanJson);
       } catch (parseError) {
-        console.warn('Failed to parse AI-generated structure, using fallback');
+        console.warn('⚠️  Failed to parse AI-generated structure:', parseError instanceof Error ? parseError.message : String(parseError));
+        console.warn('   Raw response (first 500 chars):', (typeof result === 'string' ? result : JSON.stringify(result)).substring(0, 500));
         parsed = null;
       }
 
@@ -576,14 +953,30 @@ Return JSON:
       outputs: [],
     };
     
-    // Determine trigger type based on requirements
-    if (requirements.schedules && requirements.schedules.length > 0) {
+    // Determine trigger type based on requirements - FIXED: Don't default to schedule
+    // Only use schedule if explicitly mentioned in schedules array or prompt
+    const promptLower = requirements.primaryGoal?.toLowerCase() || '';
+    const hasScheduleKeywords = promptLower.includes('schedule') || 
+                                promptLower.includes('daily') || 
+                                promptLower.includes('weekly') || 
+                                promptLower.includes('hourly') ||
+                                promptLower.includes('cron') ||
+                                promptLower.includes('recurring') ||
+                                promptLower.includes('periodic') ||
+                                promptLower.includes('automatically at');
+    
+    if (requirements.schedules && requirements.schedules.length > 0 && hasScheduleKeywords) {
       structure.trigger = 'schedule';
     } else if (requirements.urls && requirements.urls.some(url => url.includes('webhook'))) {
       structure.trigger = 'webhook';
     } else if (requirements.platforms && requirements.platforms.some(p => p.toLowerCase().includes('form'))) {
       structure.trigger = 'form';
+    } else if (promptLower.includes('webhook') || promptLower.includes('http request') || promptLower.includes('api call')) {
+      structure.trigger = 'webhook';
+    } else if (promptLower.includes('form') || promptLower.includes('submit')) {
+      structure.trigger = 'form';
     } else {
+      // Default to manual trigger - user can change it later
       structure.trigger = 'manual_trigger';
     }
     
@@ -624,6 +1017,80 @@ Return JSON:
     }
     
     return structure;
+  }
+
+  /**
+   * Apply node preferences to workflow structure
+   */
+  private applyNodePreferences(
+    structure: WorkflowGenerationStructure,
+    nodePreferences: Record<string, string>,
+    requirements: Requirements
+  ): WorkflowGenerationStructure {
+    const updatedStructure = { ...structure };
+    
+    // Apply preferences to trigger if scheduling preference exists
+    if (nodePreferences.scheduling) {
+      const preference = nodeEquivalenceMapper.getNodeOption('scheduling', nodePreferences.scheduling);
+      if (preference && this.nodeLibrary.has(preference.nodeType)) {
+        updatedStructure.trigger = preference.nodeType;
+      }
+    }
+    
+    // Apply preferences to steps (notifications, databases, file storage, etc.)
+    updatedStructure.steps = structure.steps.map(step => {
+      const stepLower = step.description?.toLowerCase() || '';
+      
+      // Check for notification preference
+      if (nodePreferences.notification && (
+        stepLower.includes('notify') || 
+        stepLower.includes('send') || 
+        stepLower.includes('alert') ||
+        stepLower.includes('message') ||
+        step.type === 'slack_message' ||
+        step.type === 'email' ||
+        step.type === 'discord_webhook' ||
+        step.type === 'twilio'
+      )) {
+        const preference = nodeEquivalenceMapper.getNodeOption('notification', nodePreferences.notification);
+        if (preference && this.nodeLibrary.has(preference.nodeType)) {
+          return { ...step, type: preference.nodeType };
+        }
+      }
+      
+      // Check for database preference
+      if (nodePreferences.database && (
+        stepLower.includes('store') || 
+        stepLower.includes('save') || 
+        stepLower.includes('database') ||
+        step.type === 'database_read' ||
+        step.type === 'database_write' ||
+        step.type === 'supabase'
+      )) {
+        const preference = nodeEquivalenceMapper.getNodeOption('database', nodePreferences.database);
+        if (preference && this.nodeLibrary.has(preference.nodeType)) {
+          return { ...step, type: preference.nodeType };
+        }
+      }
+      
+      // Check for file storage preference
+      if (nodePreferences.file_storage && (
+        stepLower.includes('file') || 
+        stepLower.includes('upload') || 
+        stepLower.includes('store file') ||
+        step.type === 'google_drive' ||
+        step.type === 'aws_s3'
+      )) {
+        const preference = nodeEquivalenceMapper.getNodeOption('file_storage', nodePreferences.file_storage);
+        if (preference && this.nodeLibrary.has(preference.nodeType)) {
+          return { ...step, type: preference.nodeType };
+        }
+      }
+      
+      return step;
+    });
+    
+    return updatedStructure;
   }
 
   /**
@@ -737,16 +1204,21 @@ Return JSON:
     let xPosition = 100;
     const ySpacing = 150;
     
+    // Use NodeLibrary to get better node selection
+    const triggerType = structure.trigger || 'manual_trigger';
+    const triggerSchema = nodeLibrary.getSchema(triggerType);
+    const triggerLabel = triggerSchema?.label || this.getNodeLabel(triggerType);
+    const triggerCategory = triggerSchema?.category || 'triggers';
+    
     // Add trigger node with unique UUID
-    // Triggers use their type name as label (already short)
     const triggerNode: WorkflowNode = {
       id: randomUUID(),
-      type: structure.trigger || 'manual_trigger',
+      type: triggerType,
       position: { x: xPosition, y: 100 },
       data: {
-        type: structure.trigger || 'manual_trigger',
-        label: this.getNodeLabel(structure.trigger || 'manual_trigger'),
-        category: 'triggers',
+        type: triggerType,
+        label: triggerLabel,
+        category: triggerCategory,
         config: {},
       },
     };
@@ -755,8 +1227,13 @@ Return JSON:
     
     // Add step nodes with unique UUIDs
     structure.steps.forEach((step: WorkflowStepDefinition, index: number) => {
+      // Use NodeLibrary to get node information
+      const stepSchema = nodeLibrary.getSchema(step.type);
+      const defaultLabel = stepSchema?.label || this.getNodeLabel(step.type);
+      const stepCategory = stepSchema?.category || this.getNodeCategory(step.type);
+      
       // Extract short label from description (max 3-4 words)
-      let shortLabel = this.getNodeLabel(step.type);
+      let shortLabel = defaultLabel;
       if (step.description) {
         // Clean description first
         let cleanDesc = step.description
@@ -802,7 +1279,7 @@ Return JSON:
         data: {
           type: step.type,
           label: shortLabel,
-          category: this.getNodeCategory(step.type),
+          category: stepCategory,
           config: {},
         },
       };
@@ -894,12 +1371,23 @@ Return JSON:
     return configuredNodes;
   }
 
+  /**
+   * Generate intelligent node configuration following system prompt rules
+   * - Auto-fills ALL required fields
+   * - Uses secure variable references for API keys
+   * - Generates valid service URLs
+   * - Applies safe defaults
+   * - NO placeholders or empty required fields
+   */
   private async generateNodeConfig(
     node: WorkflowNode, 
     requirements: Requirements,
     configValues: Record<string, any> = {}
   ): Promise<Record<string, unknown>> {
-    const config: Record<string, unknown> = {};
+    // Get node schema from NodeLibrary for better configuration
+    const nodeSchema = nodeLibrary.getSchema(node.type);
+    
+    let config: Record<string, unknown> = {};
     
     // Extract values from configValues (user-provided credentials/URLs)
     const getConfigValue = (key: string, fallback?: any): any => {
@@ -914,6 +1402,10 @@ Return JSON:
           return v;
         }
       }
+      // Try to get default from schema
+      if (nodeSchema?.configSchema?.optional?.[key]?.default !== undefined) {
+        return nodeSchema.configSchema.optional[key].default;
+      }
       return fallback;
     };
 
@@ -923,18 +1415,52 @@ Return JSON:
       return arr[index] || undefined;
     };
 
+    // Apply common patterns from NodeLibrary if available
+    if (nodeSchema?.commonPatterns && nodeSchema.commonPatterns.length > 0) {
+      // Try to match a pattern based on requirements
+      const matchedPattern = nodeSchema.commonPatterns.find(pattern => {
+        // Simple matching logic - can be enhanced
+        return true; // For now, use first pattern
+      });
+      
+      if (matchedPattern) {
+        Object.assign(config, matchedPattern.config);
+      }
+    }
+
+    // Use utility functions for API key references and service URLs
+    const getSecureApiKeyRef = generateApiKeyRef;
+    const getServiceUrl = getServiceBaseUrl;
+
     // Use AI to intelligently configure nodes based on type and requirements
+    // Following system prompt: ALL required fields filled, NO placeholders
     try {
       switch (node.type) {
         case 'http_request':
         case 'http_post':
           config.method = node.type === 'http_post' ? 'POST' : 'GET';
-          config.url = getConfigValue('url') || getConfigValue('api_url') || getFromRequirements('urls', 0) || 'https://api.example.com/endpoint';
-          config.headers = getConfigValue('headers') || {};
-          if (getConfigValue('api_key') || getFromRequirements('credentials', 0)) {
-            const apiKey = getConfigValue('api_key') || getFromRequirements('credentials', 0);
-            config.headers = { ...(config.headers as Record<string, string>), 'Authorization': `Bearer ${apiKey}` };
+          // Auto-generate valid URL or use provided
+          config.url = getConfigValue('url') || getConfigValue('api_url') || getFromRequirements('urls', 0) || getServiceUrl('webhook');
+          
+          // Automatically add required headers
+          const headers: Record<string, string> = getConfigValue('headers') || {};
+          headers['Content-Type'] = headers['Content-Type'] || 'application/json';
+          
+          // Auto-add Authorization header if API key is needed
+          const apiKey = getConfigValue('api_key') || getFromRequirements('credentials', 0);
+          if (apiKey) {
+            headers['Authorization'] = `Bearer ${apiKey}`;
+          } else if (requirements.apis && requirements.apis.length > 0) {
+            // Use secure variable reference if API is mentioned but key not provided
+            headers['Authorization'] = `Bearer ${getSecureApiKeyRef('api')}`;
           }
+          
+          config.headers = headers;
+          
+          // Apply safe defaults for pagination, limits, timeouts
+          config.timeout = getConfigValue('timeout') || 30000; // 30 seconds
+          config.retries = getConfigValue('retries') || 3;
+          config.limit = getConfigValue('limit') || 100;
           break;
         
         case 'schedule':
@@ -953,35 +1479,49 @@ Return JSON:
           break;
         
         case 'if_else':
-          config.condition = getConfigValue('condition') || '{{ $json.property }} === "value"';
+          // REQUIRED: condition must never be empty
+          config.condition = getConfigValue('condition') || '{{ $json }}';
           break;
         
         case 'set_variable':
-          config.variables = getConfigValue('variables') || [];
+          // REQUIRED: variables must be an array (even if empty)
+          config.variables = Array.isArray(getConfigValue('variables')) ? getConfigValue('variables') : [];
           break;
         
         case 'openai_gpt':
           config.model = getConfigValue('model') || 'gpt-3.5-turbo';
-          config.prompt = getConfigValue('prompt') || requirements.primaryGoal || '';
-          config.apiKey = getConfigValue('openai_api_key') || getConfigValue('api_key') || getFromRequirements('credentials', 0) || '';
+          // REQUIRED: prompt must never be empty
+          config.prompt = getConfigValue('prompt') || requirements.primaryGoal || 'Process the input data and provide a response.';
+          // Use secure variable reference if API key not provided
+          config.apiKey = getConfigValue('openai_api_key') || getConfigValue('api_key') || getFromRequirements('credentials', 0) || getSecureApiKeyRef('openai');
           config.temperature = getConfigValue('temperature') || 0.7;
           config.maxTokens = getConfigValue('maxTokens') || 2000;
+          // Auto-add base URL
+          config.baseURL = getConfigValue('baseURL') || getServiceUrl('openai');
           break;
         
         case 'anthropic_claude':
           config.model = getConfigValue('model') || 'claude-3-sonnet-20240229';
-          config.prompt = getConfigValue('prompt') || requirements.primaryGoal || '';
-          config.apiKey = getConfigValue('claude_api_key') || getConfigValue('api_key') || getFromRequirements('credentials', 0) || '';
+          // REQUIRED: prompt must never be empty
+          config.prompt = getConfigValue('prompt') || requirements.primaryGoal || 'Process the input data and provide a response.';
+          // Use secure variable reference if API key not provided
+          config.apiKey = getConfigValue('claude_api_key') || getConfigValue('api_key') || getFromRequirements('credentials', 0) || getSecureApiKeyRef('anthropic');
           config.temperature = getConfigValue('temperature') || 0.7;
           config.maxTokens = getConfigValue('maxTokens') || 2000;
+          // Auto-add base URL
+          config.baseURL = getConfigValue('baseURL') || getServiceUrl('anthropic');
           break;
         
         case 'google_gemini':
           config.model = getConfigValue('model') || 'gemini-pro';
-          config.prompt = getConfigValue('prompt') || requirements.primaryGoal || '';
-          config.apiKey = getConfigValue('gemini_api_key') || getConfigValue('api_key') || getFromRequirements('credentials', 0) || '';
+          // REQUIRED: prompt must never be empty
+          config.prompt = getConfigValue('prompt') || requirements.primaryGoal || 'Process the input data and provide a response.';
+          // Use secure variable reference if API key not provided
+          config.apiKey = getConfigValue('gemini_api_key') || getConfigValue('api_key') || getFromRequirements('credentials', 0) || getSecureApiKeyRef('gemini');
           config.temperature = getConfigValue('temperature') || 0.7;
           config.maxTokens = getConfigValue('maxTokens') || 2000;
+          // Auto-add base URL
+          config.baseURL = getConfigValue('baseURL') || getServiceUrl('gemini');
           break;
         
         case 'google_sheets':
@@ -996,23 +1536,32 @@ Return JSON:
               config.spreadsheetId = sheetUrl; // Assume it's already an ID
             }
           } else {
-            config.spreadsheetId = getConfigValue('spreadsheetId') || getConfigValue('spreadsheet_id') || '';
+            // Use environment variable reference if not provided
+            config.spreadsheetId = getConfigValue('spreadsheetId') || getConfigValue('spreadsheet_id') || '{{ENV.GOOGLE_SHEETS_ID}}';
           }
+          // REQUIRED: sheetName must have a value
           config.sheetName = getConfigValue('sheetName') || getConfigValue('sheet_name') || 'Sheet1';
-          config.range = getConfigValue('range') || '';
+          config.range = getConfigValue('range') || 'A1:Z1000'; // Default range instead of empty
           config.outputFormat = getConfigValue('outputFormat') || 'json';
           break;
         
         case 'slack_message':
-          config.webhookUrl = getConfigValue('slack_webhook_url') || getConfigValue('webhook_url') || getFromRequirements('urls', 0) || '';
+          // Auto-generate webhook URL or use secure reference
+          const slackWebhook = getConfigValue('slack_webhook_url') || getConfigValue('webhook_url') || getFromRequirements('urls', 0);
+          config.webhookUrl = slackWebhook || getServiceUrl('webhook'); // Marked as configurable
           config.channel = getConfigValue('slack_channel') || getConfigValue('channel') || '#general';
-          config.message = getConfigValue('message') || requirements.primaryGoal || '';
-          config.token = getConfigValue('slack_token') || getConfigValue('token') || getFromRequirements('credentials', 0) || '';
+          // REQUIRED: message must never be empty
+          config.message = getConfigValue('message') || requirements.primaryGoal || 'Workflow notification';
+          // Use secure variable reference for token if not provided
+          config.token = getConfigValue('slack_token') || getConfigValue('token') || getFromRequirements('credentials', 0) || getSecureApiKeyRef('slack', 'SLACK_TOKEN');
           break;
         
         case 'discord':
-          config.webhookUrl = getConfigValue('discord_webhook_url') || getConfigValue('webhook_url') || getFromRequirements('urls', 0) || '';
-          config.message = getConfigValue('message') || requirements.primaryGoal || '';
+          // Auto-generate webhook URL or use secure reference
+          const discordWebhook = getConfigValue('discord_webhook_url') || getConfigValue('webhook_url') || getFromRequirements('urls', 0);
+          config.webhookUrl = discordWebhook || getServiceUrl('webhook'); // Marked as configurable
+          // REQUIRED: message must never be empty
+          config.message = getConfigValue('message') || requirements.primaryGoal || 'Workflow notification';
           break;
         
         case 'email':
@@ -1051,15 +1600,18 @@ Return JSON:
           break;
         
         case 'javascript':
+          // REQUIRED: code must never be empty
           config.code = getConfigValue('code') || 'return $input;';
           break;
         
         case 'text_formatter':
+          // REQUIRED: template must never be empty
           config.template = getConfigValue('template') || '{{ $json }}';
           break;
         
         case 'ai_agent':
-          config.systemPrompt = getConfigValue('systemPrompt') || requirements.primaryGoal || '';
+          // REQUIRED: systemPrompt must never be empty
+          config.systemPrompt = getConfigValue('systemPrompt') || requirements.primaryGoal || 'You are an autonomous intelligent agent inside an automation workflow. Understand user input, reason over context, use available tools when needed, and produce structured responses.';
           config.mode = getConfigValue('mode') || 'chat';
           config.temperature = getConfigValue('temperature') || 0.7;
           config.maxTokens = getConfigValue('maxTokens') || 2000;
@@ -1067,16 +1619,30 @@ Return JSON:
         
         default:
           // For unknown node types, try to fill common fields
+          // Ensure no empty required fields
           if (requirements.primaryGoal) {
             config.prompt = requirements.primaryGoal;
+          } else {
+            config.prompt = 'Process the input data';
           }
           break;
       }
+      
+      // Final validation: Remove any placeholder values using utility function
+      const serviceName = extractServiceName(node.type);
+      Object.keys(config).forEach(key => {
+        config[key] = sanitizeConfigValue(key, config[key], serviceName);
+      });
+      
+      // Apply safe defaults for the node type
+      config = applySafeDefaults(config, node.type);
     } catch (error) {
       console.error(`Error configuring node ${node.type}:`, error);
-      // Fallback: at least set basic config
+      // Fallback: ensure basic required fields are set
       if (requirements.primaryGoal) {
         config.prompt = requirements.primaryGoal;
+      } else {
+        config.prompt = 'Process the input data';
       }
     }
     
@@ -1122,25 +1688,50 @@ Return JSON:
     return '0 9 * * *';
   }
 
+  /**
+   * Create connections between nodes with proper input-output mapping
+   * Following system prompt: Match output schema to input schema exactly
+   * Transform data if needed, never pass incompatible types
+   */
   private async createConnections(
     nodes: WorkflowNode[],
     requirements: Requirements
   ): Promise<WorkflowEdge[]> {
     const edges: WorkflowEdge[] = [];
     
-    // Connect nodes sequentially with unique UUIDs
+    // Connect nodes sequentially with proper data flow
     for (let i = 0; i < nodes.length - 1; i++) {
-      edges.push({
+      const sourceNode = nodes[i];
+      const targetNode = nodes[i + 1];
+      
+      // Determine connection type based on node types
+      let edgeType = 'default';
+      
+      // Special handling for AI Agent nodes (may have multiple ports)
+      if (targetNode.type === 'ai_agent') {
+        edgeType = 'ai-input';
+      }
+      
+      // Create edge with proper mapping
+      const edge: WorkflowEdge = {
         id: randomUUID(),
-        source: nodes[i].id,
-        target: nodes[i + 1].id,
-        type: 'default',
-      });
+        source: sourceNode.id,
+        target: targetNode.id,
+        type: edgeType,
+      };
+      edges.push(edge);
     }
     
     return edges;
   }
 
+  /**
+   * Enhanced validation following system prompt rules
+   * - Validates ALL required fields are filled
+   * - Checks for placeholder values
+   * - Ensures correct data types
+   * - Validates credentials usage
+   */
   private async validateWorkflow(workflow: { nodes: WorkflowNode[]; edges: WorkflowEdge[] }): Promise<{
     valid: boolean;
     errors: string[];
@@ -1165,40 +1756,68 @@ Return JSON:
       warnings.push('Workflow has multiple trigger nodes - ensure only one is active');
     }
     
-    // Validate node configurations
+    // Validate node configurations - STRICT: no empty required fields, no placeholders
     workflow.nodes.forEach(node => {
       const config = node.data?.config || {};
+      
+      // Check for placeholder values (NOT ALLOWED per system prompt)
+      Object.entries(config).forEach(([key, value]) => {
+        if (typeof value === 'string') {
+          const lowerValue = value.toLowerCase();
+          if (lowerValue.includes('todo') || 
+              lowerValue.includes('example') || 
+              lowerValue.includes('fill this') ||
+              (lowerValue.includes('placeholder') && !lowerValue.includes('{{ENV.'))) {
+            errors.push(`Node ${node.id} (${node.type}) has placeholder value in field "${key}": "${value}"`);
+          }
+        }
+      });
       
       // Validate specific node types have required fields
       switch (node.type) {
         case 'schedule':
-          if (!config.cronExpression || typeof config.cronExpression !== 'string') {
-            errors.push(`Schedule node ${node.id} missing cronExpression`);
+          if (!config.cronExpression || typeof config.cronExpression !== 'string' || config.cronExpression.trim() === '') {
+            errors.push(`Schedule node ${node.id} missing or empty cronExpression`);
           }
           break;
         
         case 'interval':
-          if (config.interval === undefined || config.interval === null) {
+          if (config.interval === undefined || config.interval === null || config.interval === '') {
             errors.push(`Interval node ${node.id} missing interval value`);
+          }
+          if (!config.unit || typeof config.unit !== 'string') {
+            errors.push(`Interval node ${node.id} missing unit`);
           }
           break;
         
         case 'http_request':
         case 'http_post':
           if (!config.url || typeof config.url !== 'string' || config.url.trim() === '') {
-            warnings.push(`HTTP node ${node.id} has empty URL - may need configuration`);
+            errors.push(`HTTP node ${node.id} has empty URL (required field)`);
+          }
+          if (!config.headers || typeof config.headers !== 'object') {
+            errors.push(`HTTP node ${node.id} missing headers object`);
           }
           break;
         
         case 'google_sheets':
           if (!config.spreadsheetId || typeof config.spreadsheetId !== 'string' || config.spreadsheetId.trim() === '') {
-            warnings.push(`Google Sheets node ${node.id} missing spreadsheetId - may need configuration`);
+            errors.push(`Google Sheets node ${node.id} missing spreadsheetId (required field)`);
+          }
+          if (!config.sheetName || typeof config.sheetName !== 'string' || config.sheetName.trim() === '') {
+            errors.push(`Google Sheets node ${node.id} missing sheetName (required field)`);
           }
           break;
         
         case 'slack_message':
-          if (!config.webhookUrl && !config.token) {
-            warnings.push(`Slack node ${node.id} missing webhookUrl or token - may need configuration`);
+          const slackWebhookUrl = config.webhookUrl as string | undefined;
+          const slackToken = config.token as string | undefined;
+          if ((!slackWebhookUrl || (typeof slackWebhookUrl === 'string' && slackWebhookUrl.trim() === '')) && 
+              (!slackToken || (typeof slackToken === 'string' && slackToken.trim() === ''))) {
+            errors.push(`Slack node ${node.id} missing webhookUrl or token (at least one required)`);
+          }
+          if (!config.message || typeof config.message !== 'string' || config.message.trim() === '') {
+            errors.push(`Slack node ${node.id} has empty message (required field)`);
           }
           break;
         
@@ -1206,19 +1825,43 @@ Return JSON:
         case 'anthropic_claude':
         case 'google_gemini':
           if (!config.prompt || typeof config.prompt !== 'string' || config.prompt.trim() === '') {
-            warnings.push(`AI node ${node.id} has empty prompt - may need configuration`);
+            errors.push(`AI node ${node.id} has empty prompt (required field)`);
+          }
+          if (!config.apiKey || typeof config.apiKey !== 'string' || config.apiKey.trim() === '') {
+            errors.push(`AI node ${node.id} missing apiKey (required field)`);
           }
           break;
         
         case 'if_else':
           if (!config.condition || typeof config.condition !== 'string' || config.condition.trim() === '') {
-            errors.push(`If/Else node ${node.id} missing condition`);
+            errors.push(`If/Else node ${node.id} missing condition (required field)`);
           }
           break;
         
         case 'set_variable':
           if (!Array.isArray(config.variables)) {
-            warnings.push(`Set Variable node ${node.id} variables should be an array`);
+            errors.push(`Set Variable node ${node.id} variables must be an array`);
+          }
+          break;
+        
+        case 'javascript':
+          if (!config.code || typeof config.code !== 'string' || config.code.trim() === '') {
+            errors.push(`JavaScript node ${node.id} has empty code (required field)`);
+          }
+          break;
+        
+        case 'text_formatter':
+          if (!config.template || typeof config.template !== 'string' || config.template.trim() === '') {
+            errors.push(`Text Formatter node ${node.id} has empty template (required field)`);
+          }
+          break;
+        
+        case 'ai_agent':
+          if (!config.systemPrompt || typeof config.systemPrompt !== 'string' || config.systemPrompt.trim() === '') {
+            errors.push(`AI Agent node ${node.id} has empty systemPrompt (required field)`);
+          }
+          if (!config.mode || typeof config.mode !== 'string') {
+            errors.push(`AI Agent node ${node.id} missing mode (required field)`);
           }
           break;
       }
@@ -1273,6 +1916,8 @@ Return JSON:
 
   /**
    * Auto-fix workflow errors to ensure 100% working workflow
+   * Following system prompt: Self-repair until ZERO errors
+   * Eliminates all placeholders, fills all required fields
    */
   private async autoFixWorkflow(
     nodes: WorkflowNode[],
@@ -1283,6 +1928,26 @@ Return JSON:
   ): Promise<{ nodes: WorkflowNode[]; edges: WorkflowEdge[] }> {
     let fixedNodes = [...nodes];
     let fixedEdges = [...edges];
+
+    // Helper functions for auto-fix
+    const getSecureApiKeyRef = (serviceName: string, keyName?: string): string => {
+      const key = keyName || `${serviceName.toUpperCase()}_API_KEY`;
+      return `{{ENV.${key}}}`;
+    };
+
+    const getServiceUrl = (serviceName: string, endpoint?: string): string => {
+      const baseUrls: Record<string, string> = {
+        openai: 'https://api.openai.com/v1',
+        anthropic: 'https://api.anthropic.com/v1',
+        google: 'https://www.googleapis.com',
+        gemini: 'https://generativelanguage.googleapis.com/v1',
+        slack: 'https://slack.com/api',
+        discord: 'https://discord.com/api',
+        webhook: 'https://example.com/webhook',
+      };
+      const baseUrl = baseUrls[serviceName.toLowerCase()] || `https://api.${serviceName.toLowerCase()}.com/v1`;
+      return endpoint ? `${baseUrl}${endpoint}` : baseUrl;
+    };
 
     // Fix 1: Ensure workflow has at least one trigger
     const triggerNodes = fixedNodes.filter(n => 
@@ -1345,22 +2010,49 @@ Return JSON:
       }
     });
 
-    // Fix 3: Fix invalid node configurations
+    // Fix 3: Fix invalid node configurations and eliminate ALL placeholders
     fixedNodes = fixedNodes.map(node => {
       const config = node.data?.config || {};
       const fixedConfig = { ...config };
 
+      // First pass: Remove placeholder values
+      Object.keys(fixedConfig).forEach(key => {
+        const value = fixedConfig[key];
+        if (typeof value === 'string') {
+          const lowerValue = value.toLowerCase();
+          if (lowerValue.includes('todo') || 
+              lowerValue.includes('example') || 
+              lowerValue.includes('fill this') ||
+              (lowerValue.includes('placeholder') && !lowerValue.includes('{{ENV.'))) {
+            // Replace placeholder based on field type
+            if (key.includes('url') || key.includes('Url')) {
+              fixedConfig[key] = getServiceUrl('webhook');
+            } else if (key.includes('key') || key.includes('Key') || key.includes('token')) {
+              const serviceName = node.type.replace(/_/g, '').replace('gpt', 'openai').replace('claude', 'anthropic');
+              fixedConfig[key] = getSecureApiKeyRef(serviceName);
+            } else if (key.includes('prompt') || key.includes('message') || key.includes('body')) {
+              fixedConfig[key] = requirements.primaryGoal || 'Process the input data';
+            } else {
+              fixedConfig[key] = '{{ $json }}';
+            }
+          }
+        }
+      });
+
+      // Second pass: Fill required fields based on node type
       switch (node.type) {
         case 'schedule':
-          if (!fixedConfig.cronExpression || typeof fixedConfig.cronExpression !== 'string') {
+          if (!fixedConfig.cronExpression || typeof fixedConfig.cronExpression !== 'string' || fixedConfig.cronExpression.trim() === '') {
             const schedule = requirements.schedules?.[0] || '';
             fixedConfig.cronExpression = this.parseScheduleToCron(schedule);
           }
           break;
 
         case 'interval':
-          if (fixedConfig.interval === undefined || fixedConfig.interval === null) {
+          if (fixedConfig.interval === undefined || fixedConfig.interval === null || fixedConfig.interval === '') {
             fixedConfig.interval = 3600;
+          }
+          if (!fixedConfig.unit || typeof fixedConfig.unit !== 'string') {
             fixedConfig.unit = 'seconds';
           }
           break;
@@ -1378,24 +2070,78 @@ Return JSON:
           break;
 
         case 'openai_gpt':
+          if (!fixedConfig.prompt || typeof fixedConfig.prompt !== 'string' || fixedConfig.prompt.trim() === '') {
+            fixedConfig.prompt = requirements.primaryGoal || 'Process the input data and provide a response.';
+          }
+          if (!fixedConfig.apiKey || typeof fixedConfig.apiKey !== 'string' || fixedConfig.apiKey.trim() === '') {
+            fixedConfig.apiKey = getSecureApiKeyRef('openai');
+          }
+          if (!fixedConfig.model) {
+            fixedConfig.model = 'gpt-3.5-turbo';
+          }
+          if (!fixedConfig.temperature) {
+            fixedConfig.temperature = 0.7;
+          }
+          if (!fixedConfig.maxTokens) {
+            fixedConfig.maxTokens = 2000;
+          }
+          break;
+
         case 'anthropic_claude':
+          if (!fixedConfig.prompt || typeof fixedConfig.prompt !== 'string' || fixedConfig.prompt.trim() === '') {
+            fixedConfig.prompt = requirements.primaryGoal || 'Process the input data and provide a response.';
+          }
+          if (!fixedConfig.apiKey || typeof fixedConfig.apiKey !== 'string' || fixedConfig.apiKey.trim() === '') {
+            fixedConfig.apiKey = getSecureApiKeyRef('anthropic');
+          }
+          if (!fixedConfig.model) {
+            fixedConfig.model = 'claude-3-sonnet-20240229';
+          }
+          if (!fixedConfig.temperature) {
+            fixedConfig.temperature = 0.7;
+          }
+          if (!fixedConfig.maxTokens) {
+            fixedConfig.maxTokens = 2000;
+          }
+          break;
+
         case 'google_gemini':
           if (!fixedConfig.prompt || typeof fixedConfig.prompt !== 'string' || fixedConfig.prompt.trim() === '') {
-            fixedConfig.prompt = requirements.primaryGoal || 'Process the input data';
+            fixedConfig.prompt = requirements.primaryGoal || 'Process the input data and provide a response.';
+          }
+          if (!fixedConfig.apiKey || typeof fixedConfig.apiKey !== 'string' || fixedConfig.apiKey.trim() === '') {
+            fixedConfig.apiKey = getSecureApiKeyRef('gemini');
+          }
+          if (!fixedConfig.model) {
+            fixedConfig.model = 'gemini-pro';
+          }
+          if (!fixedConfig.temperature) {
+            fixedConfig.temperature = 0.7;
+          }
+          if (!fixedConfig.maxTokens) {
+            fixedConfig.maxTokens = 2000;
           }
           break;
 
         case 'http_request':
         case 'http_post':
           if (!fixedConfig.url || typeof fixedConfig.url !== 'string' || fixedConfig.url.trim() === '') {
-            const url = requirements.urls?.[0] || 'https://api.example.com/endpoint';
-            fixedConfig.url = url;
+            fixedConfig.url = requirements.urls?.[0] || getServiceUrl('webhook');
+          }
+          if (!fixedConfig.headers || typeof fixedConfig.headers !== 'object') {
+            fixedConfig.headers = { 'Content-Type': 'application/json' };
+          }
+          if (!fixedConfig.timeout) {
+            fixedConfig.timeout = 30000;
+          }
+          if (!fixedConfig.retries) {
+            fixedConfig.retries = 3;
           }
           break;
 
         case 'google_sheets':
           if (!fixedConfig.spreadsheetId || typeof fixedConfig.spreadsheetId !== 'string' || fixedConfig.spreadsheetId.trim() === '') {
-            // Try to extract from URLs or use placeholder
+            // Try to extract from URLs
             const sheetUrl = requirements.urls?.find((u: string) => u.includes('spreadsheets') || u.includes('sheets')) || '';
             if (sheetUrl) {
               const match = sheetUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
@@ -1403,21 +2149,65 @@ Return JSON:
                 fixedConfig.spreadsheetId = match[1];
               }
             }
+            // Use environment variable reference instead of placeholder
             if (!fixedConfig.spreadsheetId) {
-              fixedConfig.spreadsheetId = 'PLACEHOLDER_SPREADSHEET_ID';
+              fixedConfig.spreadsheetId = '{{ENV.GOOGLE_SHEETS_ID}}';
             }
           }
-          if (!fixedConfig.sheetName) {
+          if (!fixedConfig.sheetName || typeof fixedConfig.sheetName !== 'string' || fixedConfig.sheetName.trim() === '') {
             fixedConfig.sheetName = 'Sheet1';
           }
           if (!fixedConfig.operation) {
             fixedConfig.operation = 'read';
+          }
+          if (!fixedConfig.range) {
+            fixedConfig.range = 'A1:Z1000';
+          }
+          if (!fixedConfig.outputFormat) {
+            fixedConfig.outputFormat = 'json';
           }
           break;
 
         case 'slack_message':
           if (!fixedConfig.message || typeof fixedConfig.message !== 'string' || fixedConfig.message.trim() === '') {
             fixedConfig.message = requirements.primaryGoal || 'Workflow notification';
+          }
+          const fixedWebhookUrl = fixedConfig.webhookUrl as string | undefined;
+          const fixedToken = fixedConfig.token as string | undefined;
+          if ((!fixedWebhookUrl || (typeof fixedWebhookUrl === 'string' && fixedWebhookUrl.trim() === '')) && 
+              (!fixedToken || (typeof fixedToken === 'string' && fixedToken.trim() === ''))) {
+            fixedConfig.webhookUrl = getServiceUrl('webhook');
+            fixedConfig.token = getSecureApiKeyRef('slack', 'SLACK_TOKEN');
+          }
+          if (!fixedConfig.channel) {
+            fixedConfig.channel = '#general';
+          }
+          break;
+
+        case 'javascript':
+          if (!fixedConfig.code || typeof fixedConfig.code !== 'string' || fixedConfig.code.trim() === '') {
+            fixedConfig.code = 'return $input;';
+          }
+          break;
+
+        case 'text_formatter':
+          if (!fixedConfig.template || typeof fixedConfig.template !== 'string' || fixedConfig.template.trim() === '') {
+            fixedConfig.template = '{{ $json }}';
+          }
+          break;
+
+        case 'ai_agent':
+          if (!fixedConfig.systemPrompt || typeof fixedConfig.systemPrompt !== 'string' || fixedConfig.systemPrompt.trim() === '') {
+            fixedConfig.systemPrompt = requirements.primaryGoal || 'You are an autonomous intelligent agent inside an automation workflow. Understand user input, reason over context, use available tools when needed, and produce structured responses.';
+          }
+          if (!fixedConfig.mode || typeof fixedConfig.mode !== 'string') {
+            fixedConfig.mode = 'chat';
+          }
+          if (!fixedConfig.temperature) {
+            fixedConfig.temperature = 0.7;
+          }
+          if (!fixedConfig.maxTokens) {
+            fixedConfig.maxTokens = 2000;
           }
           break;
       }

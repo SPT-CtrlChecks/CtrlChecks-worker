@@ -31,6 +31,8 @@ import analyzeWorkflowRequirementsRoute from './api/analyze-workflow-requirement
 import processRoute from './api/process';
 import executeNodeRoute from './api/execute-node';
 import aiGateway from './api/ai-gateway';
+import * as trainingStats from './api/training-stats';
+import getCredentialsRoute from './api/get-credentials';
 
 
 
@@ -85,6 +87,11 @@ app.get('/health', asyncHandler(async (req: Request, res: Response) => {
       '/api/ai/analyze-image',
       '/api/ai/models',
       '/api/ai/metrics',
+      '/api/training/stats',
+      '/api/training/categories',
+      '/api/training/workflows',
+      '/api/training/similar',
+      '/api/training/examples',
       '/process',
       '/execute-node',
       '/api/execute-node',
@@ -142,9 +149,22 @@ app.post('/api/analyze-workflow-requirements', asyncHandler(analyzeWorkflowRequi
 app.post('/execute-node', asyncHandler(executeNodeRoute));
 app.post('/api/execute-node', asyncHandler(executeNodeRoute)); // Also support /api prefix
 
+// Get User Credentials
+app.get('/api/credentials', asyncHandler(getCredentialsRoute));
+
 // AI Gateway - Unified AI Services
 app.use('/api/ai', aiGateway);
 console.log('🤖 AI Gateway available at /api/ai');
+
+// Training Statistics API
+app.get('/api/training/stats', asyncHandler(trainingStats.getTrainingStats));
+app.get('/api/training/categories', asyncHandler(trainingStats.getTrainingCategories));
+app.get('/api/training/workflows', asyncHandler(trainingStats.getTrainingWorkflows));
+app.post('/api/training/similar', asyncHandler(trainingStats.findSimilarWorkflows));
+app.get('/api/training/examples', asyncHandler(trainingStats.getTrainingExamples));
+app.get('/api/training/usage', asyncHandler(trainingStats.getTrainingUsage));
+app.post('/api/training/reload', asyncHandler(trainingStats.reloadTrainingDataset));
+console.log('📚 Training API available at /api/training/*');
 
 // AI Endpoints (Ollama-First)
 app.post('/api/ai/generate', asyncHandler(async (req: Request, res: Response) => {
@@ -258,6 +278,22 @@ async function startServer() {
   
   try {
     const server = app.listen(PORT, '0.0.0.0', () => {
+      // Initialize WebSocket server for real-time visualization
+      try {
+        const { getExecutionStateManager } = require('./services/workflow-executor/execution-state-manager');
+        const { VisualizationService } = require('./services/workflow-executor/visualization-service');
+        
+        const stateManager = getExecutionStateManager();
+        const visualizationService = new VisualizationService(stateManager);
+        visualizationService.initialize(server);
+        
+        console.log('📡 WebSocket server initialized for real-time execution visualization');
+        console.log(`   WebSocket endpoint: ws://localhost:${PORT}/ws/executions`);
+      } catch (wsError: any) {
+        console.warn('⚠️  WebSocket initialization failed:', wsError?.message || wsError);
+        console.log('⚠️  Real-time visualization may be unavailable');
+        console.log('💡 Make sure "ws" package is installed: npm install ws');
+      }
       const networkAddresses = getNetworkAddresses(PORT);
       
       console.log('\n' + '='.repeat(60));
@@ -308,6 +344,14 @@ async function startServer() {
       console.log(`  POST /api/ai/analyze-image - Image analysis`);
       console.log(`  GET  /api/ai/models - List available models`);
       console.log(`  GET  /api/ai/metrics - AI performance metrics`);
+      console.log(`\n📚 Training API Endpoints:`);
+      console.log(`  GET  /api/training/stats - Training dataset statistics`);
+      console.log(`  GET  /api/training/categories - Available workflow categories`);
+      console.log(`  GET  /api/training/workflows - Get workflows by category`);
+      console.log(`  POST /api/training/similar - Find similar workflows`);
+      console.log(`  GET  /api/training/examples - Get training examples for few-shot learning`);
+      console.log(`  GET  /api/training/usage - Get training usage metrics`);
+      console.log(`  POST /api/training/reload - Reload training dataset (hot reload)`);
       console.log(`\n🤖 AI Gateway Endpoints:`);
       console.log(`  POST /api/ai/chatbot/message - Chichu chatbot`);
       console.log(`  POST /api/ai/editor/suggest-improvements - Workflow node suggestions`);

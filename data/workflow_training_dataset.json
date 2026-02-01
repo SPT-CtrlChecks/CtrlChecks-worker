@@ -1,0 +1,1082 @@
+{
+  "version": "1.0",
+  "description": "AI Workflow Agent Training Dataset - 12 comprehensive workflow examples for training autonomous workflow generation and execution",
+  "totalWorkflows": 12,
+  "workflows": [
+    {
+      "id": "workflow_1",
+      "category": "Customer Support",
+      "goal": "Automatically handle customer support queries with AI and escalate complex cases to humans",
+      "phase1": {
+        "step1": {
+          "userPrompt": "Build an AI customer support agent that can automatically handle customer queries across channels, understand intent and sentiment, answer using a knowledge base, create and prioritize CRM tickets, and escalate to a human agent only when required."
+        },
+        "step2": {
+          "clarificationQuestions": [
+            "Which input channels should trigger the workflow? (Web chat, WhatsApp, API webhook, Email)",
+            "Which CRM system should be used for ticket creation and updates? (Freshdesk, Intercom, Zoho CRM)",
+            "Should negative sentiment always trigger escalation or only for specific intents?",
+            "What confidence threshold should trigger human handoff?",
+            "Where should human handoff notifications be sent? (Slack, Email, Internal Dashboard)",
+            "Should conversation history be stored for future context?"
+          ],
+          "userResponses": {
+            "channels": "Web chat + API webhook",
+            "crm": "Freshdesk",
+            "escalation": "negative sentiment OR low AI confidence",
+            "notification": "Slack",
+            "memory": "enabled"
+          }
+        },
+        "step3": {
+          "systemPrompt": "Build an omnichannel AI customer support workflow that classifies intent and sentiment, answers via knowledge base, creates prioritized CRM tickets, and escalates to humans when required.",
+          "wordCount": 26,
+          "temperature": 0.2
+        },
+        "step4": {
+          "requirements": {
+            "primaryGoal": "Automatically handle customer support queries with AI and escalate complex cases to humans",
+            "inputs": ["Customer message", "Channel metadata", "Conversation history"],
+            "outputs": ["AI response", "CRM ticket", "Human escalation notification"],
+            "keySteps": [
+              "Receive customer message",
+              "Classify intent",
+              "Analyze sentiment",
+              "Search knowledge base",
+              "Respond automatically",
+              "Create and prioritize ticket",
+              "Escalate when required"
+            ],
+            "platforms": ["Web chat", "API Webhook", "Freshdesk", "Slack"],
+            "credentialsRequired": [
+              "LLM API key",
+              "Knowledge base access",
+              "Freshdesk API key",
+              "Slack webhook URL"
+            ],
+            "constraints": [
+              "Escalate only when sentiment is negative or confidence is low",
+              "Ensure no duplicate ticket creation"
+            ],
+            "complexityLevel": "High",
+            "memoryEnabled": true
+          }
+        },
+        "step5": {
+          "structure": {
+            "flowType": "Conditional branching with parallel analysis",
+            "description": "Customer message enters system, analyzed for intent and sentiment in parallel, knowledge base searched, AI generates response, CRM ticket created and prioritized, escalation decision made, human notified if required"
+          },
+          "selectedNodes": [
+            "chat_trigger",
+            "webhook",
+            "ai_agent",
+            "sentiment_analyzer",
+            "database_read",
+            "ai_agent",
+            "if_else",
+            "supabase",
+            "slack_message"
+          ],
+          "nodeConfigurations": {
+            "chat_trigger": {
+              "channel": "Web chat",
+              "payload": "message, user_id, session_id"
+            },
+            "webhook": {
+              "method": "POST",
+              "payload": "message, channel, metadata"
+            },
+            "ai_agent": {
+              "role": "Intent Classifier",
+              "model": "llama3.1:8b",
+              "output": "intent_label, confidence_score"
+            },
+            "sentiment_analyzer": {
+              "output": "sentiment (positive/neutral/negative)",
+              "threshold": "negative triggers escalation flag"
+            },
+            "database_read": {
+              "purpose": "Knowledge base search",
+              "topK": 5
+            },
+            "if_else": {
+              "condition": "sentiment == negative OR ai_confidence < 0.6",
+              "truePath": "escalation",
+              "falsePath": "continue"
+            },
+            "supabase": {
+              "action": "Create or update ticket",
+              "fields": "intent, sentiment, priority, conversation transcript"
+            },
+            "slack_message": {
+              "channel": "#customer-support-escalations",
+              "message": "Includes user info, issue summary, sentiment, urgency"
+            }
+          },
+          "connections": [
+            "chat_trigger → ai_agent (intent classification)",
+            "webhook → ai_agent (intent classification)",
+            "ai_agent → sentiment_analyzer",
+            "sentiment_analyzer → database_read (KB search)",
+            "database_read → ai_agent (response generation)",
+            "ai_agent → if_else (escalation check)",
+            "if_else (true) → supabase (ticket creation)",
+            "if_else (true) → slack_message (notification)"
+          ]
+        },
+        "step6": {
+          "validationChecks": [
+            "Node configuration completeness: Passed",
+            "Required credentials present: Passed",
+            "Data type compatibility: Passed",
+            "Conditional routing validity: Passed",
+            "Port compatibility: Passed"
+          ],
+          "autoHealing": {
+            "fixesRequired": 0,
+            "validationIterations": 1,
+            "finalStatus": "100% valid and executable"
+          }
+        },
+        "step7": {
+          "complexityScore": 8.5,
+          "enhancementSuggestions": [
+            "Add auto-reply delay simulation",
+            "Add SLA breach monitor",
+            "Add customer satisfaction feedback node"
+          ]
+        }
+      },
+      "phase2": {
+        "executionInitialization": {
+          "executionId": "created",
+          "iterationCount": 0,
+          "memoryService": "initialized",
+          "agentState": "prepared",
+          "reasoningEngine": "activated"
+        },
+        "executionLoop": [
+          {
+            "iteration": 1,
+            "state": "New customer message received",
+            "availableActions": ["Classify intent", "Analyze sentiment"],
+            "reasoning": "Action chosen: intent_classification_agent. Confidence: 0.91. Continue: true",
+            "execution": "Intent classified as 'Billing Issue'",
+            "stateUpdated": "intent stored"
+          },
+          {
+            "iteration": 2,
+            "availableActions": ["Sentiment analysis"],
+            "reasoning": "Action chosen: sentiment_analysis_agent. Confidence: 0.93",
+            "execution": "Sentiment: Negative"
+          },
+          {
+            "iteration": 3,
+            "availableActions": ["Knowledge base search"],
+            "execution": "Relevant articles retrieved"
+          },
+          {
+            "iteration": 4,
+            "availableActions": ["Generate AI response"],
+            "execution": "AI response generated. Confidence: 0.52"
+          },
+          {
+            "iteration": 5,
+            "availableActions": ["Escalation routing"],
+            "reasoning": "Conditions met (negative sentiment + low confidence)",
+            "execution": "Escalation triggered"
+          },
+          {
+            "iteration": 6,
+            "availableActions": ["Create CRM ticket", "Notify human"],
+            "execution": "Ticket created in Freshdesk. Slack notification sent"
+          }
+        ],
+        "executionFinalization": {
+          "finalStatus": "completed",
+          "goalAchieved": true,
+          "totalIterations": 6,
+          "results": [
+            "AI response",
+            "CRM ticket ID",
+            "Human escalation notification",
+            "Complete reasoning history",
+            "Action execution log"
+          ]
+        }
+      }
+    },
+    {
+      "id": "workflow_2",
+      "category": "Sales Automation",
+      "goal": "Automatically qualify, score, and route sales leads to the correct CRM pipeline",
+      "phase1": {
+        "step1": {
+          "userPrompt": "Build an AI system that captures incoming leads from a form, automatically qualifies and scores them, calculates confidence, routes them to the correct CRM pipeline, and notifies the sales team."
+        },
+        "step2": {
+          "clarificationQuestions": [
+            "Which CRM should be used for lead creation and routing? (HubSpot, Salesforce, Pipedrive)",
+            "What lead attributes should influence qualification? (Company size, budget, intent, timeline)",
+            "What score threshold defines a high-quality lead?",
+            "Should low-quality leads be stored or discarded?",
+            "Which Slack channel should receive lead notifications?",
+            "Should duplicate lead detection be enabled?"
+          ],
+          "userResponses": {
+            "crm": "HubSpot",
+            "qualification": "budget, intent, and timeline",
+            "threshold": "score ≥ 70",
+            "storeAll": "yes",
+            "slackChannel": "#sales-leads",
+            "duplicateDetection": "enabled"
+          }
+        },
+        "step3": {
+          "systemPrompt": "Build an AI lead qualification workflow that captures leads, evaluates intent and quality, scores confidence, routes leads into CRM pipelines, and notifies sales teams automatically.",
+          "wordCount": 24,
+          "temperature": 0.2
+        },
+        "step4": {
+          "requirements": {
+            "primaryGoal": "Automatically qualify, score, and route sales leads to the correct CRM pipeline",
+            "inputs": ["Lead form data", "Contact details", "Company information"],
+            "outputs": ["Qualified lead record", "Lead score", "CRM pipeline assignment", "Sales notification"],
+            "keySteps": [
+              "Capture lead",
+              "Qualify lead intent",
+              "Score lead quality",
+              "Calculate confidence",
+              "Route lead to CRM",
+              "Notify sales team"
+            ],
+            "platforms": ["Web Form", "HubSpot", "Slack"],
+            "credentialsRequired": ["LLM API key", "HubSpot API key", "Slack webhook URL"],
+            "constraints": ["Avoid duplicate lead creation", "Ensure consistent scoring logic"],
+            "complexityLevel": "Medium-High",
+            "memoryEnabled": false
+          }
+        },
+        "step5": {
+          "structure": {
+            "flowType": "Linear with scoring-based decision logic",
+            "description": "Lead submits form, intent and quality analyzed, score calculated, confidence computed, routed to CRM pipeline, sales team notified"
+          },
+          "selectedNodes": [
+            "form",
+            "ai_agent",
+            "javascript",
+            "ai_agent",
+            "if_else",
+            "http_request",
+            "slack_message"
+          ],
+          "nodeConfigurations": {
+            "form": {
+              "fields": "Name, Email, Company, Budget range, Timeline, Use case",
+              "validation": "Required fields enforced"
+            },
+            "ai_agent": {
+              "role": "Lead Qualification Agent",
+              "model": "llama3.1:8b",
+              "outputs": "qualification_status (qualified/unqualified), qualification_reason"
+            },
+            "javascript": {
+              "purpose": "Lead scoring calculation",
+              "scoringLogic": "Budget fit: 40%, Intent strength: 40%, Timeline urgency: 20%",
+              "output": "lead_score (0-100)"
+            },
+            "if_else": {
+              "condition": "lead_score >= 70",
+              "truePath": "Sales pipeline",
+              "falsePath": "Nurture pipeline"
+            },
+            "http_request": {
+              "method": "POST",
+              "url": "HubSpot API",
+              "action": "Create or update lead",
+              "fields": "Contact details, Lead score, Qualification status, Pipeline assignment"
+            },
+            "slack_message": {
+              "channel": "#sales-leads",
+              "message": "Lead summary, Score, Assigned pipeline"
+            }
+          },
+          "connections": [
+            "form → ai_agent (qualification)",
+            "ai_agent → javascript (scoring)",
+            "javascript → ai_agent (confidence calculation)",
+            "ai_agent → if_else (routing decision)",
+            "if_else → http_request (CRM creation)",
+            "if_else → slack_message (notification)"
+          ]
+        },
+        "step6": {
+          "validationChecks": [
+            "Node configuration completeness: Passed",
+            "Required credentials presence: Passed",
+            "Lead score data type validation: Passed",
+            "CRM routing rules validation: Passed",
+            "Duplicate handling validation: Passed"
+          ],
+          "autoHealing": {
+            "fixesRequired": 0,
+            "validationIterations": 1,
+            "finalStatus": "100% valid and executable"
+          }
+        },
+        "step7": {
+          "complexityScore": 7.5,
+          "enhancementSuggestions": [
+            "Add enrichment API (LinkedIn, Clearbit)",
+            "Add auto-follow-up email node",
+            "Add sales SLA timer"
+          ]
+        }
+      },
+      "phase2": {
+        "executionInitialization": {
+          "executionId": "created",
+          "iterationCount": 0,
+          "memoryService": "disabled",
+          "agentState": "initialized",
+          "reasoningEngine": "ready"
+        },
+        "executionLoop": [
+          {
+            "iteration": 1,
+            "state": "New form submission received",
+            "availableActions": ["Qualify lead"],
+            "reasoning": "Selected action: lead_qualification_agent. Confidence: 0.89. Continue: true",
+            "execution": "Lead qualified as high intent"
+          },
+          {
+            "iteration": 2,
+            "availableActions": ["Score lead"],
+            "execution": "Lead score calculated: 82"
+          },
+          {
+            "iteration": 3,
+            "availableActions": ["Calculate confidence"],
+            "execution": "Confidence score: 0.91"
+          },
+          {
+            "iteration": 4,
+            "availableActions": ["Route lead to CRM"],
+            "reasoning": "Score meets high-quality threshold",
+            "execution": "Lead routed to Sales pipeline in HubSpot"
+          },
+          {
+            "iteration": 5,
+            "availableActions": ["Notify sales team"],
+            "execution": "Slack notification sent"
+          }
+        ],
+        "executionFinalization": {
+          "finalStatus": "completed",
+          "goalAchieved": true,
+          "totalIterations": 5
+        }
+      }
+    },
+    {
+      "id": "workflow_3",
+      "category": "Sales Automation",
+      "goal": "Automatically perform sales follow-ups based on time and lead behavior while ensuring SLA compliance",
+      "phase1": {
+        "step1": {
+          "userPrompt": "Build an AI sales follow-up automation system that monitors lead behavior, sends scheduled follow-ups, analyzes responses, recommends next actions, and ensures SLA compliance."
+        },
+        "step2": {
+          "userResponses": {
+            "trigger": "Time-based + behavior-based",
+            "emailProvider": "Google Gmail",
+            "followUpSequence": "3 steps",
+            "stopCondition": "negative sentiment or reply",
+            "slaDuration": "48 hours"
+          }
+        },
+        "step3": {
+          "systemPrompt": "Build an AI workflow that automates sales follow-ups, analyzes lead responses, recommends next actions, sends emails through providers, and monitors CRM SLA compliance.",
+          "wordCount": 23
+        },
+        "step4": {
+          "requirements": {
+            "primaryGoal": "Automatically perform sales follow-ups based on time and lead behavior while ensuring SLA compliance",
+            "inputs": ["Lead status", "Last interaction timestamp", "Email replies"],
+            "outputs": ["Automated follow-up emails", "Sentiment analysis results", "Next-action recommendation", "SLA status"],
+            "platforms": ["Google Gmail", "CRM"],
+            "complexityLevel": "Medium",
+            "memoryEnabled": true
+          }
+        },
+        "step5": {
+          "selectedNodes": [
+            "schedule",
+            "ai_agent",
+            "google_gmail",
+            "sentiment_analyzer",
+            "ai_agent",
+            "database_read"
+          ],
+          "connections": [
+            "schedule → ai_agent (follow-up logic)",
+            "ai_agent → google_gmail (send email)",
+            "google_gmail → sentiment_analyzer (analyze reply)",
+            "sentiment_analyzer → ai_agent (recommend action)",
+            "ai_agent → database_read (SLA monitoring)"
+          ]
+        }
+      },
+      "phase2": {
+        "executionLoop": [
+          {
+            "iteration": 1,
+            "state": "Lead pending follow-up",
+            "execution": "Follow-up email sent (Step 1)"
+          },
+          {
+            "iteration": 2,
+            "state": "Waiting for reply",
+            "execution": "No reply yet, continue automation"
+          },
+          {
+            "iteration": 3,
+            "state": "Lead replied",
+            "execution": "Sentiment detected: Positive"
+          },
+          {
+            "iteration": 4,
+            "execution": "Recommendation: Escalate to sales call"
+          },
+          {
+            "iteration": 5,
+            "execution": "SLA within limits"
+          }
+        ],
+        "executionFinalization": {
+          "totalIterations": 5,
+          "goalAchieved": true
+        }
+      }
+    },
+    {
+      "id": "workflow_4",
+      "category": "Knowledge Management",
+      "goal": "Provide accurate, secure AI-powered answers to employee questions using internal company documents",
+      "phase1": {
+        "step1": {
+          "userPrompt": "Build an internal AI knowledge agent that allows employees to ask questions and receive accurate answers sourced from company documents, policies, and internal knowledge bases."
+        },
+        "step2": {
+          "userResponses": {
+            "formats": "PDF, DOCX, Images",
+            "ingestion": "continuous",
+            "accessControl": "role-based",
+            "confidenceThreshold": "0.65",
+            "logUnanswered": "yes",
+            "sourceCitations": "enabled"
+          }
+        },
+        "step3": {
+          "systemPrompt": "Build an internal AI knowledge assistant that answers employee questions using indexed company documents, applies access control, cites sources, and logs unanswered queries.",
+          "wordCount": 25
+        },
+        "step4": {
+          "requirements": {
+            "primaryGoal": "Provide accurate, secure AI-powered answers to employee questions using internal company documents",
+            "inputs": ["Employee question", "User role metadata", "Company documents"],
+            "outputs": ["AI-generated answer", "Source citations", "Confidence score", "Unanswered question log"],
+            "platforms": ["Internal Chat", "Document Storage"],
+            "complexityLevel": "High",
+            "memoryEnabled": true
+          }
+        },
+        "step5": {
+          "selectedNodes": [
+            "chat_trigger",
+            "database_read",
+            "ai_agent",
+            "ai_agent",
+            "database_write"
+          ],
+          "connections": [
+            "chat_trigger → database_read (document retrieval)",
+            "database_read → ai_agent (answer generation)",
+            "ai_agent → ai_agent (answer refinement)",
+            "ai_agent → database_write (log unanswered)"
+          ]
+        }
+      },
+      "phase2": {
+        "executionLoop": [
+          {
+            "iteration": 1,
+            "state": "Employee submits question",
+            "execution": "Relevant document chunks retrieved"
+          },
+          {
+            "iteration": 2,
+            "execution": "Answer draft generated with citations. Confidence: 0.78"
+          },
+          {
+            "iteration": 3,
+            "execution": "Final answer produced with citations included"
+          }
+        ],
+        "executionFinalization": {
+          "totalIterations": 3,
+          "goalAchieved": true
+        }
+      }
+    },
+    {
+      "id": "workflow_5",
+      "category": "HR Automation",
+      "goal": "Automatically screen and shortlist job candidates based on resume content and job requirements",
+      "phase1": {
+        "step1": {
+          "userPrompt": "Build an AI system that can screen thousands of resumes, evaluate candidate fit against job requirements, shortlist qualified candidates, and notify selected applicants automatically."
+        },
+        "step2": {
+          "userResponses": {
+            "formats": "PDF, DOCX",
+            "screening": "job-specific",
+            "threshold": "0.70",
+            "rejectionEmails": "enabled",
+            "auditStorage": "enabled",
+            "humanReview": "not required initially"
+          }
+        },
+        "step3": {
+          "systemPrompt": "Build an AI resume screening agent that parses resumes, matches skills to job requirements, scores confidence, recommends decisions, and automates shortlisting communication.",
+          "wordCount": 26
+        },
+        "step4": {
+          "requirements": {
+            "primaryGoal": "Automatically screen and shortlist job candidates based on resume content and job requirements",
+            "inputs": ["Candidate resume", "Job description", "Candidate metadata"],
+            "outputs": ["Candidate score", "Shortlist decision", "Confidence score", "Email notification status"],
+            "platforms": ["HR Forms", "Email", "Spreadsheet storage"],
+            "complexityLevel": "Medium-High",
+            "memoryEnabled": true
+          }
+        },
+        "step5": {
+          "selectedNodes": [
+            "form",
+            "ai_agent",
+            "ai_agent",
+            "if_else",
+            "google_sheets",
+            "email"
+          ],
+          "connections": [
+            "form → ai_agent (resume parsing)",
+            "ai_agent → ai_agent (skill matching)",
+            "ai_agent → if_else (decision)",
+            "if_else → google_sheets (store results)",
+            "if_else → email (notify candidate)"
+          ]
+        }
+      },
+      "phase2": {
+        "executionLoop": [
+          {
+            "iteration": 1,
+            "state": "Candidate submits resume",
+            "execution": "Resume converted to structured data"
+          },
+          {
+            "iteration": 2,
+            "execution": "Skill matching completed. Match score: 0.82"
+          },
+          {
+            "iteration": 3,
+            "execution": "Confidence score: 0.79. Decision: Shortlisted"
+          },
+          {
+            "iteration": 4,
+            "execution": "Record stored in Google Sheets. Shortlist email sent"
+          }
+        ],
+        "executionFinalization": {
+          "totalIterations": 4,
+          "goalAchieved": true
+        }
+      }
+    },
+    {
+      "id": "workflow_6",
+      "category": "Hiring Automation",
+      "goal": "End-to-end interview scheduling with human control",
+      "phase1": {
+        "step1": {
+          "userPrompt": "Automatically schedule interviews with shortlisted candidates, coordinate calendars, send emails, set reminders, and take human approval before final confirmation."
+        },
+        "step3": {
+          "systemPrompt": "You are an interview scheduling automation agent. Coordinate calendars, obtain approvals, notify candidates and interviewers, and ensure SLA-compliant reminders with zero conflicts.",
+          "wordCount": 28
+        },
+        "step4": {
+          "requirements": {
+            "primaryGoal": "Automatically schedule interviews with human approval and coordinate all stakeholders",
+            "inputs": ["Candidate details", "Interviewer list", "Interview type", "Preferred time slots"],
+            "outputs": ["Confirmed calendar event", "Email notifications", "Reminder schedules"],
+            "platforms": ["Google Calendar", "Gmail"],
+            "constraints": ["No double booking", "Human approval mandatory", "Timezone-aware scheduling"],
+            "complexityLevel": "Medium",
+            "memoryEnabled": false
+          }
+        },
+        "step5": {
+          "selectedNodes": [
+            "ai_agent",
+            "google_calendar",
+            "if_else",
+            "google_gmail",
+            "schedule"
+          ],
+          "connections": [
+            "ai_agent → google_calendar (availability check)",
+            "google_calendar → if_else (approval check)",
+            "if_else → google_calendar (event creation)",
+            "google_calendar → google_gmail (send confirmation)",
+            "google_calendar → schedule (set reminders)"
+          ]
+        }
+      },
+      "phase2": {
+        "executionLoop": [
+          {
+            "iteration": 1,
+            "execution": "Agent checks interviewer availability. Candidate preferences analyzed"
+          },
+          {
+            "iteration": 2,
+            "execution": "Interview slots proposed. Sent for human approval"
+          },
+          {
+            "iteration": 3,
+            "execution": "Approval received. Calendar event created"
+          },
+          {
+            "iteration": 4,
+            "execution": "Emails dispatched. Reminders scheduled"
+          }
+        ],
+        "executionFinalization": {
+          "totalIterations": 4,
+          "goalAchieved": true
+        }
+      }
+    },
+    {
+      "id": "workflow_7",
+      "category": "Team Productivity",
+      "goal": "Automatically convert meetings into structured notes and actionable tasks",
+      "phase1": {
+        "step1": {
+          "userPrompt": "Automatically generate meeting notes, summarize discussions, extract action items, store them in a document system, and notify the team."
+        },
+        "step3": {
+          "systemPrompt": "You are a meeting intelligence agent. Summarize discussions, extract decisions and action items, format notes clearly, and notify teams with high accuracy.",
+          "wordCount": 24
+        },
+        "step4": {
+          "requirements": {
+            "primaryGoal": "Automatically convert meetings into structured notes and actionable tasks",
+            "inputs": ["Meeting transcript or text", "Meeting metadata (date, participants)"],
+            "outputs": ["Meeting summary", "Action item list", "Stored document link", "Notification message"],
+            "platforms": ["Google Docs or Notion", "Slack"],
+            "constraints": ["Preserve key decisions", "Avoid hallucinated tasks", "Maintain clarity and brevity"],
+            "complexityLevel": "Medium",
+            "memoryEnabled": false
+          }
+        },
+        "step5": {
+          "selectedNodes": [
+            "ai_agent",
+            "text_summarizer",
+            "ai_agent",
+            "google_drive",
+            "slack_message"
+          ],
+          "connections": [
+            "ai_agent → text_summarizer (generate notes)",
+            "text_summarizer → ai_agent (extract action items)",
+            "ai_agent → google_drive (store notes)",
+            "google_drive → slack_message (notify team)"
+          ]
+        }
+      },
+      "phase2": {
+        "executionLoop": [
+          {
+            "iteration": 1,
+            "execution": "Transcript processed. Discussion structure identified"
+          },
+          {
+            "iteration": 2,
+            "execution": "Summary generated. Key decisions extracted"
+          },
+          {
+            "iteration": 3,
+            "execution": "Action items identified and validated"
+          },
+          {
+            "iteration": 4,
+            "execution": "Notes stored in document system. Slack notification sent"
+          }
+        ],
+        "executionFinalization": {
+          "totalIterations": 4,
+          "goalAchieved": true
+        }
+      }
+    },
+    {
+      "id": "workflow_8",
+      "category": "Marketing Automation",
+      "goal": "Automatically publish content with AI-generated captions across social platforms",
+      "phase1": {
+        "step1": {
+          "userPrompt": "Automatically fetch new content, generate optimized captions using AI, format the post, schedule it, and publish across social media platforms."
+        },
+        "step3": {
+          "systemPrompt": "You are a social media automation agent. Generate high-performing captions, format content per platform rules, schedule posts, and publish consistently without duplication.",
+          "wordCount": 25
+        },
+        "step4": {
+          "requirements": {
+            "primaryGoal": "Automatically publish content with AI-generated captions across social platforms",
+            "inputs": ["RSS feed URL", "Content metadata (title, description, link)"],
+            "outputs": ["Platform-ready posts", "Published social media posts", "Posting logs"],
+            "platforms": ["Instagram", "Twitter", "LinkedIn"],
+            "constraints": ["Avoid duplicate posting", "Respect platform character limits", "Maintain brand tone consistency"],
+            "complexityLevel": "Medium",
+            "memoryEnabled": false
+          }
+        },
+        "step5": {
+          "selectedNodes": [
+            "webhook",
+            "ai_agent",
+            "text_formatter",
+            "schedule",
+            "http_request"
+          ],
+          "connections": [
+            "webhook → ai_agent (caption generation)",
+            "ai_agent → text_formatter (platform formatting)",
+            "text_formatter → schedule (scheduling)",
+            "schedule → http_request (publish to platforms)"
+          ]
+        }
+      },
+      "phase2": {
+        "executionLoop": [
+          {
+            "iteration": 1,
+            "execution": "RSS feed polled. New content detected"
+          },
+          {
+            "iteration": 2,
+            "execution": "AI generates platform-specific captions"
+          },
+          {
+            "iteration": 3,
+            "execution": "Text formatted and validated. Posts scheduled"
+          },
+          {
+            "iteration": 4,
+            "execution": "Posts published to social platforms. Execution logged"
+          }
+        ],
+        "executionFinalization": {
+          "totalIterations": 4,
+          "goalAchieved": true
+        }
+      }
+    },
+    {
+      "id": "workflow_9",
+      "category": "Data Hygiene",
+      "goal": "Detect, merge, and clean duplicate CRM records automatically without data loss",
+      "phase1": {
+        "step1": {
+          "userPrompt": "Identify duplicate CRM records, intelligently merge them, and update the database with clean, unified records."
+        },
+        "step3": {
+          "systemPrompt": "You are a CRM data hygiene agent. Detect duplicate records, intelligently merge fields, preserve history, and write clean records back without data loss or conflicts.",
+          "wordCount": 26
+        },
+        "step4": {
+          "requirements": {
+            "primaryGoal": "Detect, merge, and clean duplicate CRM records automatically without data loss",
+            "inputs": ["CRM database records"],
+            "outputs": ["Unified records", "Duplicate cleanup report"],
+            "platforms": ["CRM database"],
+            "constraints": ["No data loss", "Preserve most recent and most complete fields", "Maintain referential integrity"],
+            "complexityLevel": "Medium",
+            "memoryEnabled": false
+          }
+        },
+        "step5": {
+          "selectedNodes": [
+            "database_read",
+            "javascript",
+            "javascript",
+            "database_write"
+          ],
+          "connections": [
+            "database_read → javascript (duplicate detection)",
+            "javascript → javascript (merge records)",
+            "javascript → database_write (write clean data)"
+          ]
+        }
+      },
+      "phase2": {
+        "executionLoop": [
+          {
+            "iteration": 1,
+            "execution": "CRM records read in batches"
+          },
+          {
+            "iteration": 2,
+            "execution": "Duplicate groups detected"
+          },
+          {
+            "iteration": 3,
+            "execution": "Records merged intelligently. Conflicts resolved"
+          },
+          {
+            "iteration": 4,
+            "execution": "Clean records written to database. Logs stored"
+          }
+        ],
+        "executionFinalization": {
+          "totalIterations": 4,
+          "goalAchieved": true
+        }
+      }
+    },
+    {
+      "id": "workflow_10",
+      "category": "Enterprise Orchestration",
+      "goal": "Coordinate multiple AI agents with consensus, validation, and self-healing for complex workflows",
+      "phase1": {
+        "step1": {
+          "userPrompt": "Autonomously orchestrate multiple AI agents to collaborate on tasks, vote on decisions, validate outcomes, handle errors, and maintain workflow state."
+        },
+        "step3": {
+          "systemPrompt": "You are an autonomous orchestration agent. Assign roles, coordinate multiple agents, apply voting consensus, maintain workflow state, store execution context, and self-heal errors.",
+          "wordCount": 27
+        },
+        "step4": {
+          "requirements": {
+            "primaryGoal": "Coordinate multiple AI agents with consensus, validation, and self-healing for complex workflows",
+            "inputs": ["Agent list", "Task definitions", "Workflow rules"],
+            "outputs": ["Consensus decisions", "Workflow state updates", "Execution logs", "Error resolution records"],
+            "platforms": ["Execution context store (database / hybrid memory service)"],
+            "constraints": ["Prevent deadlocks in multi-agent decision-making", "Ensure state consistency", "Preserve execution history"],
+            "complexityLevel": "High",
+            "memoryEnabled": true
+          }
+        },
+        "step5": {
+          "selectedNodes": [
+            "ai_agent",
+            "ai_agent",
+            "ai_agent",
+            "database_read",
+            "database_write",
+            "error_handler"
+          ],
+          "connections": [
+            "ai_agent → ai_agent (role assignment)",
+            "ai_agent → ai_agent (coordination)",
+            "ai_agent → ai_agent (voting consensus)",
+            "ai_agent → database_read (state management)",
+            "database_read → database_write (persist state)",
+            "error_handler → ai_agent (self-healing)"
+          ]
+        }
+      },
+      "phase2": {
+        "executionLoop": [
+          {
+            "iteration": 1,
+            "execution": "Multi-agent coordinator assigns initial tasks"
+          },
+          {
+            "iteration": 2,
+            "execution": "Agent roles finalized. Tasks delegated"
+          },
+          {
+            "iteration": 3,
+            "execution": "Agents execute tasks in parallel. Voting consensus collects decisions"
+          },
+          {
+            "iteration": 4,
+            "execution": "Workflow state updated. Execution context persisted"
+          },
+          {
+            "iteration": 5,
+            "execution": "Errors detected and healed automatically"
+          }
+        ],
+        "executionFinalization": {
+          "totalIterations": 5,
+          "goalAchieved": true
+        }
+      }
+    },
+    {
+      "id": "workflow_11",
+      "category": "DevOps Automation",
+      "goal": "Monitor CI/CD pipelines, detect failures, retry deployments intelligently, and notify the team",
+      "phase1": {
+        "step1": {
+          "userPrompt": "Monitor CI/CD pipelines, detect build or deployment failures, automatically retry with backoff if necessary, and send notifications to Slack."
+        },
+        "step3": {
+          "systemPrompt": "You are a DevOps monitoring agent. Track CI/CD pipelines, detect failures, retry deployments using backoff strategies, handle errors gracefully, and notify the team via Slack.",
+          "wordCount": 26
+        },
+        "step4": {
+          "requirements": {
+            "primaryGoal": "Monitor CI/CD pipelines, detect failures, retry deployments intelligently, and notify the team",
+            "inputs": ["Jenkins or GitHub pipeline metadata", "Deployment status events"],
+            "outputs": ["Deployment status logs", "Retry attempts", "Slack notifications"],
+            "platforms": ["Jenkins", "GitHub", "Slack"],
+            "constraints": ["Avoid endless retry loops", "Handle transient failures automatically", "Ensure notification reliability"],
+            "complexityLevel": "Medium",
+            "memoryEnabled": false
+          }
+        },
+        "step5": {
+          "selectedNodes": [
+            "webhook",
+            "error_trigger",
+            "error_handler",
+            "slack_message"
+          ],
+          "connections": [
+            "webhook → error_trigger (monitor pipelines)",
+            "error_trigger → error_handler (retry with backoff)",
+            "error_handler → slack_message (notify team)"
+          ]
+        }
+      },
+      "phase2": {
+        "executionLoop": [
+          {
+            "iteration": 1,
+            "execution": "Monitor CI/CD pipelines for status updates"
+          },
+          {
+            "iteration": 2,
+            "execution": "Detect failed builds or deployments"
+          },
+          {
+            "iteration": 3,
+            "execution": "Retry failed deployments via backoff strategy"
+          },
+          {
+            "iteration": 4,
+            "execution": "Send Slack notifications about failures and retry results"
+          },
+          {
+            "iteration": 5,
+            "execution": "Log deployment attempts and results"
+          }
+        ],
+        "executionFinalization": {
+          "totalIterations": 5,
+          "goalAchieved": true
+        }
+      }
+    },
+    {
+      "id": "workflow_12",
+      "category": "Finance Automation",
+      "goal": "Track unpaid invoices, send reminders, and automate follow-ups to ensure payments",
+      "phase1": {
+        "step1": {
+          "userPrompt": "Monitor unpaid invoices, generate reminders automatically, schedule follow-up emails, and send notifications through email or payment platforms."
+        },
+        "step3": {
+          "systemPrompt": "You are an AI payment reminder agent. Track unpaid invoices, generate automated reminders, schedule follow-ups, and send emails through integrated payment platforms.",
+          "wordCount": 25
+        },
+        "step4": {
+          "requirements": {
+            "primaryGoal": "Track unpaid invoices, send reminders, and automate follow-ups to ensure payments",
+            "inputs": ["Invoice database records", "Customer contact information"],
+            "outputs": ["Reminder emails sent", "Scheduled follow-ups", "Payment tracking logs"],
+            "platforms": ["Stripe", "Razorpay", "Email systems (SMTP, Gmail, etc.)"],
+            "constraints": ["Avoid sending duplicate reminders", "Respect customer communication preferences", "Include invoice details or links accurately"],
+            "complexityLevel": "Medium",
+            "memoryEnabled": false
+          }
+        },
+        "step5": {
+          "selectedNodes": [
+            "database_read",
+            "ai_agent",
+            "schedule",
+            "email",
+            "http_request"
+          ],
+          "connections": [
+            "database_read → ai_agent (generate reminders)",
+            "ai_agent → schedule (schedule follow-ups)",
+            "schedule → email (send reminders)",
+            "email → http_request (payment platform notification)"
+          ]
+        }
+      },
+      "phase2": {
+        "executionLoop": [
+          {
+            "iteration": 1,
+            "execution": "Fetch unpaid invoices from database"
+          },
+          {
+            "iteration": 2,
+            "execution": "Generate personalized reminders"
+          },
+          {
+            "iteration": 3,
+            "execution": "Schedule reminders via scheduler"
+          },
+          {
+            "iteration": 4,
+            "execution": "Send emails via email node. Send payment links through payment platforms"
+          },
+          {
+            "iteration": 5,
+            "execution": "Log reminders sent and track payments"
+          }
+        ],
+        "executionFinalization": {
+          "totalIterations": 5,
+          "goalAchieved": true
+        }
+      }
+    }
+  ],
+  "trainingMetrics": {
+    "averageStepsPerWorkflow": 6.5,
+    "averageNodesPerWorkflow": 7.2,
+    "totalExecutionIterations": 68,
+    "complexityDistribution": {
+      "high": 4,
+      "mediumHigh": 4,
+      "medium": 4
+    }
+  }
+}
+

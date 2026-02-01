@@ -2,6 +2,7 @@
 // Provides step-by-step reasoning capabilities for AI agents
 
 import { LLMAdapter, LLMMessage, LLMOptions } from './llm-adapter';
+import { workflowTrainingService } from '../services/ai/workflow-training-service';
 
 export interface ReasoningStep {
   step: number;
@@ -188,7 +189,19 @@ Example format: ["action1", "action2", "action3"]`;
       ? `\nConstraints:\n${context.constraints.map(c => `- ${c}`).join('\n')}`
       : '';
 
-    return `Goal: ${context.goal}
+    // Get few-shot examples from training service for better reasoning
+    let fewShotPrompt = '';
+    try {
+      fewShotPrompt = workflowTrainingService.buildExecutionReasoningFewShotPrompt(
+        context.goal,
+        context.currentState,
+        context.availableActions
+      );
+    } catch (error) {
+      console.warn('⚠️  Failed to get training examples for execution reasoning:', error);
+    }
+
+    const basePrompt = `Goal: ${context.goal}
 
 Current State:
 ${JSON.stringify(context.currentState, null, 2)}
@@ -211,6 +224,13 @@ Think step by step. Return your reasoning in a structured format:
 - Next Action: [action ID]
 - Confidence: [0.0 to 1.0]
 - Goal Achieved: [true/false]`;
+
+    // Prepend few-shot examples if available
+    if (fewShotPrompt && fewShotPrompt.trim().length > 0) {
+      return `${fewShotPrompt}\n\n${basePrompt}`;
+    }
+
+    return basePrompt;
   }
 
   private parseReasoningResponse(
