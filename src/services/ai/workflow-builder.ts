@@ -231,13 +231,13 @@ export class AgenticWorkflowBuilder {
       ? await requirementsExtractor.extractRequirements(userPrompt, systemPrompt, answers, constraints)
       : await this.extractWorkflowRequirements(userPrompt, systemPrompt, constraints);
     
-    // Step 4.5: Identify required credentials BEFORE building (only for selected services)
-    onProgress?.({ step: 4, stepName: 'Credential Analysis', progress: 45, details: { message: 'Identifying required credentials...' } });
-    const requiredCredentials = await this.identifyRequiredCredentials(requirements, userPrompt, answers);
-    
-    // Step 5: Build workflow
+    // Step 5: Build workflow structure FIRST to detect AI Agent nodes
     onProgress?.({ step: 5, stepName: 'Building', progress: 50, details: { message: 'Building workflow structure...' } });
     const structure = await this.generateStructure(requirements);
+    
+    // Step 4.5: Identify required credentials AFTER structure is generated (to detect AI Agent nodes)
+    onProgress?.({ step: 4, stepName: 'Credential Analysis', progress: 45, details: { message: 'Identifying required credentials...' } });
+    const requiredCredentials = await this.identifyRequiredCredentials(requirements, userPrompt, answers, structure);
     
     // Apply node preferences from user answers if available
     const nodePreferences = constraints?.answers 
@@ -262,12 +262,12 @@ export class AgenticWorkflowBuilder {
     const configuredNodes = await this.configureNodes(nodes, requirements, constraints);
     
     onProgress?.({ step: 5, stepName: 'Building', progress: 80, details: { message: 'Creating connections...' } });
-    const connections = await this.createConnections(configuredNodes, requirements);
+    const { nodes: nodesWithChatModels, edges: connections } = await this.createConnections(configuredNodes, requirements);
     
     // Step 6: Validate workflow and auto-fix errors using WorkflowValidator service
     onProgress?.({ step: 6, stepName: 'Validating', progress: 90, details: { message: 'Validating workflow...' } });
     
-    let finalNodes = configuredNodes;
+    let finalNodes = nodesWithChatModels;
     let finalEdges = connections;
     
     // Use WorkflowValidator service for comprehensive validation and auto-fix
@@ -347,7 +347,8 @@ export class AgenticWorkflowBuilder {
   private async identifyRequiredCredentials(
     requirements: Requirements,
     userPrompt: string,
-    answers?: Record<string, string>
+    answers?: Record<string, string>,
+    structure?: WorkflowGenerationStructure
   ): Promise<string[]> {
     const credentials: string[] = [];
     
@@ -389,10 +390,51 @@ export class AgenticWorkflowBuilder {
       }
     }
     
+    // Check if AI Agent nodes will be used (always add Gemini API key for AI Agent workflows)
+    const promptLower = userPrompt.toLowerCase();
+    const hasAIFunctionality = 
+      promptLower.includes('ai agent') ||
+      promptLower.includes('ai assistant') ||
+      promptLower.includes('chatbot') ||
+      promptLower.includes('chat bot') ||
+      promptLower.includes('llm') ||
+      promptLower.includes('language model') ||
+      promptLower.includes('generate') ||
+      promptLower.includes('analyze') ||
+      promptLower.includes('summarize') ||
+      promptLower.includes('classify') ||
+      promptLower.includes('sentiment') ||
+      promptLower.includes('intent') ||
+      promptLower.includes('natural language') ||
+      promptLower.includes('nlp') ||
+      promptLower.includes('text analysis') ||
+      promptLower.includes('content generation') ||
+      promptLower.includes('ai-powered') ||
+      promptLower.includes('ai powered') ||
+      promptLower.includes('using ai') ||
+      promptLower.includes('with ai') ||
+      promptLower.includes('ai model');
+    
+    // CRITICAL: Check if AI Agent nodes are in the workflow structure
+    // AI Agent nodes ALWAYS require Google Gemini API key (default chat model)
+    // This ensures that whenever AI Agent nodes are used, Gemini API key is requested in Step 3 (credentials step)
+    if (structure && structure.steps && Array.isArray(structure.steps)) {
+      const hasAIAgentNode = structure.steps.some((step: WorkflowStepDefinition) => 
+        step.type === 'ai_agent' || step.type?.toLowerCase() === 'ai_agent'
+      );
+      if (hasAIAgentNode && !credentials.includes('GEMINI_API_KEY')) {
+        console.log('🔑 AI Agent node detected in workflow structure - adding GEMINI_API_KEY to required credentials');
+        credentials.push('GEMINI_API_KEY');
+      }
+    }
+    
+    // If AI functionality is detected and no specific provider was selected, default to Gemini
+    if (hasAIFunctionality && !selectedServices.aiProvider && !credentials.includes('GEMINI_API_KEY')) {
+      credentials.push('GEMINI_API_KEY');
+    }
+    
     // Fallback: If no answers provided, use prompt analysis (for backward compatibility)
     if (!answers || Object.keys(answers).length === 0) {
-      const promptLower = userPrompt.toLowerCase();
-      
       // Check for AI services in prompt
       if (promptLower.includes('openai') || promptLower.includes('gpt') || promptLower.includes('chatgpt')) {
         if (!credentials.includes('OPENAI_API_KEY')) credentials.push('OPENAI_API_KEY');
@@ -400,7 +442,7 @@ export class AgenticWorkflowBuilder {
       if (promptLower.includes('claude') || promptLower.includes('anthropic')) {
         if (!credentials.includes('ANTHROPIC_API_KEY')) credentials.push('ANTHROPIC_API_KEY');
       }
-      if (promptLower.includes('gemini') || promptLower.includes('google ai')) {
+      if (promptLower.includes('gemini') || promptLower.includes('google ai') || hasAIFunctionality) {
         if (!credentials.includes('GEMINI_API_KEY')) credentials.push('GEMINI_API_KEY');
       }
       
@@ -598,11 +640,11 @@ export class AgenticWorkflowBuilder {
     const configuredNodes = await this.configureNodes(nodes, requirements);
     
     onProgress({ step: 'connecting', progress: 85 });
-    const connections = await this.createConnections(configuredNodes, requirements);
+    const { nodes: nodesWithChatModels, edges: connections } = await this.createConnections(configuredNodes, requirements);
     
     onProgress({ step: 'validating', progress: 95 });
     const validation = await this.validateWorkflow({
-      nodes: configuredNodes,
+      nodes: nodesWithChatModels,
       edges: connections,
     });
     
@@ -1616,6 +1658,26 @@ Return JSON:
           config.temperature = getConfigValue('temperature') || 0.7;
           config.maxTokens = getConfigValue('maxTokens') || 2000;
           break;
+
+        case 'chat_model':
+          // REQUIRED: provider, model, apiKey, and prompt must never be empty
+          config.provider = getConfigValue('provider') || 'gemini';
+          config.model = getConfigValue('model') || 'gemini-2.5-flash';
+          // Try to get API key from answers/credentials (if user provided it in Step 3 credentials step)
+          // Check various possible key names - prioritize user-provided credentials
+          const geminiApiKey = getConfigValue('GEMINI_API_KEY') ||  // From credentials step (uppercase)
+                              getConfigValue('gemini_api_key') ||   // Lowercase variant
+                              getConfigValue('google_gemini_api_key') || 
+                              getConfigValue('GOOGLE_GEMINI_API_KEY') ||
+                              getConfigValue('geminiApiKey') ||
+                              getConfigValue('apiKey') || 
+                              getConfigValue('api_key') ||
+                              getFromRequirements('credentials', 0) || // From requirements
+                              '{{ENV.GOOGLE_GEMINI_API_KEY}}'; // Fallback to env var
+          config.apiKey = geminiApiKey;
+          config.prompt = getConfigValue('prompt') || 'You are a helpful AI assistant that provides accurate and useful responses.';
+          config.temperature = getConfigValue('temperature') || 0.7;
+          break;
         
         default:
           // For unknown node types, try to fill common fields
@@ -1692,17 +1754,89 @@ Return JSON:
    * Create connections between nodes with proper input-output mapping
    * Following system prompt: Match output schema to input schema exactly
    * Transform data if needed, never pass incompatible types
+   * 
+   * Also automatically creates and connects Chat Model nodes for AI Agent nodes
    */
   private async createConnections(
     nodes: WorkflowNode[],
     requirements: Requirements
-  ): Promise<WorkflowEdge[]> {
+  ): Promise<{ nodes: WorkflowNode[]; edges: WorkflowEdge[] }> {
     const edges: WorkflowEdge[] = [];
+    let finalNodes = [...nodes];
+    
+    // First, ensure all AI Agent nodes have Chat Model nodes connected
+    const aiAgentNodes = finalNodes.filter(n => n.type === 'ai_agent');
+    const existingChatModelNodes = finalNodes.filter(n => n.type === 'chat_model');
+    
+    for (const aiAgentNode of aiAgentNodes) {
+      // Check if this AI Agent already has a Chat Model connected
+      const hasChatModel = edges.some(e => 
+        e.target === aiAgentNode.id && 
+        finalNodes.find(n => n.id === e.source)?.type === 'chat_model'
+      );
+      
+      if (!hasChatModel) {
+        // Create a Chat Model node configured with Google Gemini
+        // Ensure position exists with defaults
+        const aiAgentPosition = aiAgentNode.position || { x: 100, y: 100 };
+        const chatModelNode: WorkflowNode = {
+          id: randomUUID(),
+          type: 'chat_model',
+          position: { 
+            x: aiAgentPosition.x - 200, 
+            y: aiAgentPosition.y 
+          },
+          data: {
+            type: 'chat_model',
+            label: 'Google Gemini',
+            category: 'ai',
+            config: {
+              provider: 'gemini',
+              model: 'gemini-2.5-flash',
+              apiKey: '{{ENV.GOOGLE_GEMINI_API_KEY}}',
+              prompt: 'You are a helpful AI assistant that provides accurate and useful responses.',
+              temperature: 0.7,
+              maxTokens: 2000,
+            },
+          },
+        };
+        
+        finalNodes.push(chatModelNode);
+        
+        // Connect Chat Model to AI Agent's chat_model port
+        const chatModelEdge: WorkflowEdge = {
+          id: randomUUID(),
+          source: chatModelNode.id,
+          target: aiAgentNode.id,
+          type: 'chat_model', // Special edge type for chat_model connections
+        };
+        edges.push(chatModelEdge);
+      }
+    }
     
     // Connect nodes sequentially with proper data flow
-    for (let i = 0; i < nodes.length - 1; i++) {
-      const sourceNode = nodes[i];
-      const targetNode = nodes[i + 1];
+    for (let i = 0; i < finalNodes.length - 1; i++) {
+      const sourceNode = finalNodes[i];
+      const targetNode = finalNodes[i + 1];
+      
+      // Skip if this connection already exists (e.g., chat_model to ai_agent)
+      const connectionExists = edges.some(e => 
+        e.source === sourceNode.id && e.target === targetNode.id
+      );
+      
+      if (connectionExists) {
+        continue;
+      }
+      
+      // Skip if source is chat_model (already connected above)
+      if (sourceNode.type === 'chat_model') {
+        continue;
+      }
+      
+      // Skip if target is chat_model (chat_model only connects to ai_agent)
+      if (targetNode.type === 'chat_model') {
+        continue;
+      }
       
       // Determine connection type based on node types
       let edgeType = 'default';
@@ -1722,7 +1856,7 @@ Return JSON:
       edges.push(edge);
     }
     
-    return edges;
+    return { nodes: finalNodes, edges };
   }
 
   /**
@@ -1862,6 +1996,21 @@ Return JSON:
           }
           if (!config.mode || typeof config.mode !== 'string') {
             errors.push(`AI Agent node ${node.id} missing mode (required field)`);
+          }
+          break;
+
+        case 'chat_model':
+          if (!config.provider || typeof config.provider !== 'string' || config.provider.trim() === '') {
+            errors.push(`Chat Model node ${node.id} missing provider (required field)`);
+          }
+          if (!config.model || typeof config.model !== 'string' || config.model.trim() === '') {
+            errors.push(`Chat Model node ${node.id} missing model (required field)`);
+          }
+          if (!config.apiKey || typeof config.apiKey !== 'string' || config.apiKey.trim() === '') {
+            errors.push(`Chat Model node ${node.id} missing apiKey (required field)`);
+          }
+          if (!config.prompt || typeof config.prompt !== 'string' || config.prompt.trim() === '') {
+            errors.push(`Chat Model node ${node.id} has empty prompt (required field)`);
           }
           break;
       }
@@ -2208,6 +2357,24 @@ Return JSON:
           }
           if (!fixedConfig.maxTokens) {
             fixedConfig.maxTokens = 2000;
+          }
+          break;
+
+        case 'chat_model':
+          if (!fixedConfig.provider || typeof fixedConfig.provider !== 'string') {
+            fixedConfig.provider = 'gemini';
+          }
+          if (!fixedConfig.model || typeof fixedConfig.model !== 'string' || fixedConfig.model.trim() === '') {
+            fixedConfig.model = 'gemini-2.5-flash';
+          }
+          if (!fixedConfig.apiKey || typeof fixedConfig.apiKey !== 'string' || fixedConfig.apiKey.trim() === '') {
+            fixedConfig.apiKey = '{{ENV.GOOGLE_GEMINI_API_KEY}}';
+          }
+          if (!fixedConfig.prompt || typeof fixedConfig.prompt !== 'string' || fixedConfig.prompt.trim() === '') {
+            fixedConfig.prompt = 'You are a helpful AI assistant that provides accurate and useful responses.';
+          }
+          if (!fixedConfig.temperature) {
+            fixedConfig.temperature = 0.7;
           }
           break;
       }

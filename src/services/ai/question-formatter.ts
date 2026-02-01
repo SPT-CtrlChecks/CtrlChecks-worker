@@ -46,133 +46,58 @@ export class QuestionFormatter {
   }
   
   /**
-   * Format options for display with pros/cons
+   * Format options for display - Simplified, brief labels only
    */
   private formatOptionsForDisplay(options: NodeOption[]): DisplayOption[] {
     return options.map(option => ({
       value: option.id,
-      label: this.getUserFriendlyLabel(option.name),
+      label: this.getUserFriendlyLabel(option.name), // Just the name, no descriptions
       icon: option.icon,
-      description: option.description,
-      pros: this.getProsForNode(option.id),
-      cons: this.getConsForNode(option.id),
-      bestFor: this.getBestUseCases(option.id),
-      complexity: this.getComplexityRating(option.id)
+      description: "", // No descriptions
+      pros: [], // Removed
+      cons: [], // Removed
+      bestFor: [], // Removed
+      complexity: 'low' // Simplified
     }));
   }
   
   /**
-   * Get base question text for category
+   * Get base question text for category - Simplified, shorter questions
    */
   private getBaseQuestion(category: string, userPrompt?: string): string {
     const templates: Record<string, string> = {
-      notification: userPrompt?.toLowerCase().includes('notify') || userPrompt?.toLowerCase().includes('alert')
-        ? "How would you like to receive notifications?"
-        : "How should I send the notification?",
-      database: "Where should I store the data?",
-      file_storage: "Where should I store the files?",
-      authentication: "How should users authenticate?",
+      notification: "How to send notifications?",
+      database: "Where to store data?",
+      file_storage: "Where to store files?",
+      authentication: "How to authenticate?",
       scheduling: "When should this workflow run?"
     };
     
-    return templates[category] || `How would you like to handle ${category}?`;
+    return templates[category] || `How to handle ${category}?`;
   }
   
   /**
-   * Get category explanation
+   * Get category explanation - Simplified, only essential info
    */
   private getCategoryExplanation(category: string): string {
-    const explanations: Record<string, string> = {
-      notification: "Different notification methods have different strengths. Some are better for urgent alerts, others for detailed reports.",
-      database: "The choice of database affects performance, scalability, and ease of use for different types of data.",
-      file_storage: "File storage options vary in cost, accessibility, and integration capabilities.",
-      authentication: "Authentication methods balance security, user experience, and implementation complexity.",
-      scheduling: "Trigger methods determine when and how your workflow runs."
-    };
-    
-    return explanations[category] || "";
-  }
-  
-  /**
-   * Get recommendation based on category and options
-   */
-  private getRecommendation(category: string, options: NodeOption[]): string {
-    if (category === 'notification') {
-      const hasSlack = options.some(o => o.id === 'slack');
-      const hasEmail = options.some(o => o.id === 'email');
-      const hasSMS = options.some(o => o.id === 'twilio');
-      
-      if (hasSlack && hasEmail && hasSMS) {
-        return "💡 Recommendation: Use Slack for team alerts, Email for customer notifications or detailed reports, and SMS for urgent alerts.";
-      } else if (hasSlack && hasEmail) {
-        return "💡 Recommendation: Use Slack for team alerts and Email for customer notifications or detailed reports.";
-      }
-    }
-    
-    if (category === 'database') {
-      const hasPostgres = options.some(o => o.id === 'postgresql');
-      const hasSupabase = options.some(o => o.id === 'supabase');
-      
-      if (hasPostgres && hasSupabase) {
-        return "💡 Recommendation: Use PostgreSQL for traditional applications, Supabase for modern web apps with real-time features.";
-      }
-    }
-    
-    if (category === 'scheduling') {
-      const hasSchedule = options.some(o => o.id === 'schedule');
-      const hasWebhook = options.some(o => o.id === 'webhook');
-      
-      if (hasSchedule && hasWebhook) {
-        return "💡 Recommendation: Use Schedule for regular automated tasks, Webhook for event-driven workflows.";
-      }
-    }
-    
+    // Return empty - no long explanations needed
     return "";
   }
   
   /**
-   * Get considerations for category
+   * Get recommendation - Simplified, removed long recommendations
+   */
+  private getRecommendation(category: string, options: NodeOption[]): string {
+    // Return empty - no recommendations needed
+    return "";
+  }
+  
+  /**
+   * Get considerations - Simplified, removed long lists
    */
   private getConsiderations(category: string): string[] {
-    const considerations: Record<string, string[]> = {
-      notification: [
-        "Who needs to receive the notification?",
-        "How urgent is the information?",
-        "Do recipients need to take action?",
-        "Is there existing infrastructure?",
-        "What's your budget for notifications?"
-      ],
-      database: [
-        "What's your team's expertise?",
-        "Do you need real-time capabilities?",
-        "How much data will you store?",
-        "What are your performance requirements?",
-        "Do you need built-in authentication?"
-      ],
-      file_storage: [
-        "How large are the files?",
-        "How many users need access?",
-        "Do you need version control?",
-        "What's your budget?",
-        "Where are your users located?"
-      ],
-      authentication: [
-        "What's your security requirement?",
-        "Do users already have accounts?",
-        "What's your technical expertise?",
-        "Do you need social login?",
-        "What's your compliance requirement?"
-      ],
-      scheduling: [
-        "Do you need fixed times or event triggers?",
-        "How often will this run?",
-        "Do you need manual control?",
-        "What timezone should be used?",
-        "Is this time-sensitive?"
-      ]
-    };
-    
-    return considerations[category] || [];
+    // Return empty - no long consideration lists needed
+    return [];
   }
   
   /**
