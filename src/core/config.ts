@@ -2,11 +2,12 @@
 
 export const config: any = {
   // Database
-  databaseUrl: process.env.DATABASE_URL || process.env.SUPABASE_URL,
+  databaseUrl: process.env.DATABASE_URL || process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL,
   
   // Supabase (if still using for auth)
-  supabaseUrl: process.env.SUPABASE_URL || '',
-  supabaseKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
+  // Support both standard naming and VITE_ prefix (for shared .env files)
+  supabaseUrl: process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '',
+  supabaseKey: process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_SERVICE_ROLE_KEY || '',
   
   // Ollama
   ollamaHost: process.env.OLLAMA_HOST || process.env.OLLAMA_BASE_URL || 'http://localhost:11434',

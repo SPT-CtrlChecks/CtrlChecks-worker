@@ -5,6 +5,7 @@
 import { Request, Response } from 'express';
 import { getSupabaseClient } from '../core/database/supabase-compat';
 import { executeNode } from './execute-workflow';
+import { LRUNodeOutputsCache } from '../core/cache/lru-node-outputs-cache';
 
 // WorkflowNode interface must match execute-workflow.ts
 interface WorkflowNode {
@@ -61,8 +62,42 @@ export default async function executeNodeHandler(req: Request, res: Response) {
       });
     }
 
-    // Get user_id from workflow or auth
+    // Get user_id from workflow
     const userId = workflow.user_id;
+    
+    // Extract current user from Authorization header (if available)
+    // This is optional - node can execute without it
+    let currentUserId: string | undefined;
+    try {
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.replace('Bearer ', '').trim();
+        if (token) {
+          try {
+            const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+            if (!authError && user) {
+              currentUserId = user.id;
+              console.log(`[DEBUG] Current user: ${currentUserId}`);
+            } else if (authError) {
+              // Log auth error but don't fail - node can still execute
+              console.log(`[DEBUG] Auth error (non-fatal): ${authError.message || 'Unknown auth error'}`);
+            }
+          } catch (authErr: any) {
+            // Handle network/connection errors gracefully
+            const errorMsg = authErr?.message || 'Unknown error';
+            if (errorMsg.includes('ENOTFOUND') || errorMsg.includes('fetch failed')) {
+              console.log('[DEBUG] Supabase connection issue - continuing without current user ID');
+            } else {
+              console.log(`[DEBUG] Auth extraction error (non-fatal): ${errorMsg}`);
+            }
+          }
+        }
+      }
+    } catch (error: any) {
+      // Auth is optional - node can still execute without it
+      const errorMsg = error?.message || 'Unknown error';
+      console.log(`[DEBUG] Auth extraction failed (non-fatal): ${errorMsg}`);
+    }
 
     // Build node object in the format expected by executeNode
     const node: WorkflowNode = {
@@ -91,15 +126,19 @@ export default async function executeNodeHandler(req: Request, res: Response) {
     // In debug mode, we use the provided input as the context
     // This must match the structure expected by resolveTemplate for $json resolution
     const inputObj = input && typeof input === 'object' ? input as Record<string, unknown> : {};
-    const nodeOutputs: Record<string, unknown> = {
-      trigger: inputObj,
-      input: inputObj,
-      // Spread input properties at root level for direct access
-      ...inputObj,
-      // Ensure $json and json point to input data (for {{$json.value1}} syntax)
-      $json: inputObj,
-      json: inputObj,
-    };
+    
+    // Use LRU cache for consistency with full workflow execution
+    // Small cache size (10) is sufficient for single node execution
+    const nodeOutputs = new LRUNodeOutputsCache(10, false);
+    nodeOutputs.set('trigger', inputObj, true); // Mark trigger as persistent
+    nodeOutputs.set('input', inputObj);
+    nodeOutputs.set('$json', inputObj);
+    nodeOutputs.set('json', inputObj);
+    
+    // Also add input properties directly for template resolution
+    Object.keys(inputObj).forEach(key => {
+      nodeOutputs.set(key, inputObj[key]);
+    });
 
     // Execute the node using the same engine as full workflow
     console.log(`[DEBUG] Executing node: ${node.data.label} (${nodeType})`);
@@ -109,12 +148,16 @@ export default async function executeNodeHandler(req: Request, res: Response) {
       nodeOutputs,
       supabase,
       workflowId,
-      userId
+      userId,
+      currentUserId
     );
 
     const executionTime = Date.now() - startTime;
 
     console.log(`[DEBUG] Node execution completed in ${executionTime}ms`);
+    
+    // Clear cache after execution
+    nodeOutputs.clear();
 
     // Return response in format expected by frontend
     return res.json({

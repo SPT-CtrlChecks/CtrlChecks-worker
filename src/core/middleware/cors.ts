@@ -12,6 +12,8 @@ const getAllowedOrigins = (): string[] => {
     'http://localhost:3000',
     'http://localhost:8080',  // Alternative Vite port
     'http://127.0.0.1:8080',
+    'http://localhost:8081',  // Additional dev port
+    'http://127.0.0.1:8081',
   ];
 
   // Add environment variable origins
@@ -30,12 +32,16 @@ const getAllowedOrigins = (): string[] => {
 };
 
 const allowedOrigins = getAllowedOrigins();
+const allowAllOrigins = allowedOrigins.includes('*');
 
 export function corsMiddleware(req: Request, res: Response, next: NextFunction) {
   const origin = req.headers.origin;
 
   // Check if origin is allowed
-  if (origin && allowedOrigins.includes(origin)) {
+  if (allowAllOrigins) {
+    // If wildcard is enabled, allow all origins
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  } else if (origin && allowedOrigins.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   } else if (!origin) {
     // Allow requests with no origin (like mobile apps or curl requests)

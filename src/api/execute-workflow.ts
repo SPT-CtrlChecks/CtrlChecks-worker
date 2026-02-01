@@ -3,10 +3,14 @@
 
 import { Request, Response } from 'express';
 import { getSupabaseClient } from '../core/database/supabase-compat';
+import { SupabaseClient } from '@supabase/supabase-js';
 import { config } from '../core/config';
 import { LLMAdapter } from '../shared/llm-adapter';
 import { HuggingFaceRouterClient } from '../shared/huggingface-client';
 import { getGoogleAccessToken } from '../shared/google-sheets';
+import { LRUNodeOutputsCache } from '../core/cache/lru-node-outputs-cache';
+import { validationMiddleware } from '../core/validation/validation-middleware';
+import { safeParse, safeDeepClone } from '../shared/safe-json';
 
 interface WorkflowNode {
   id: string;
@@ -130,8 +134,10 @@ function getNestedValue(obj: unknown, path: string): unknown {
  * - {{key.field}} - nested object access
  * - {{$json.path}} - n8n-style $json syntax (maps to input/context data)
  * - {{input.path}} - input object access
+ * 
+ * Phase 3: Enhanced with template validation and helpful suggestions
  */
-function resolveTemplate(template: string, context: Record<string, unknown>): string {
+function resolveTemplate(template: string, context: Record<string, unknown>, nodeId?: string): string {
   // First, ensure $json and json aliases point to the input/context data
   // The primary data source is typically in 'input' or spread at root level
   const jsonData = context.input || context.json || context.$json || context;
@@ -159,49 +165,134 @@ function resolveTemplate(template: string, context: Record<string, unknown>): st
     }
   }
   
+  // Helper function to find similar field names (for suggestions)
+  function findSimilarFields(path: string, availableFields: string[]): string[] {
+    const pathLower = path.toLowerCase();
+    const suggestions: Array<{ field: string; score: number }> = [];
+    
+    for (const field of availableFields) {
+      const fieldLower = field.toLowerCase();
+      let score = 0;
+      
+      // Exact match
+      if (fieldLower === pathLower) {
+        score = 100;
+      }
+      // Starts with
+      else if (fieldLower.startsWith(pathLower) || pathLower.startsWith(fieldLower)) {
+        score = 80;
+      }
+      // Contains
+      else if (fieldLower.includes(pathLower) || pathLower.includes(fieldLower)) {
+        score = 60;
+      }
+      // Levenshtein-like (simple character overlap)
+      else {
+        const commonChars = [...pathLower].filter(c => fieldLower.includes(c)).length;
+        score = (commonChars / Math.max(pathLower.length, fieldLower.length)) * 40;
+      }
+      
+      if (score > 30) {
+        suggestions.push({ field, score });
+      }
+    }
+    
+    return suggestions
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3)
+      .map(s => s.field);
+  }
+  
   // Support multiple template patterns: {{key}}, {{key.field}}, {{$json.path}}, {{input.path}}
   return template.replace(/\{\{([^}]+)\}\}/g, (match, path) => {
     const trimmedPath = path.trim();
+    let resolvedValue: unknown = undefined;
+    let resolved = false;
     
     // Handle $json syntax: {{$json.value1}} or {{$json.path.to.value}}
     if (trimmedPath.startsWith('$json.')) {
       const jsonPath = trimmedPath.substring(6); // Remove '$json.' prefix
-      const value = getNestedValue(jsonData, jsonPath);
-      if (value !== null && value !== undefined) {
-        return String(value);
+      resolvedValue = getNestedValue(jsonData, jsonPath);
+      if (resolvedValue !== null && resolvedValue !== undefined) {
+        resolved = true;
       }
-      return match; // Path not found, return original
     }
-    
     // Handle json syntax: {{json.value1}}
-    if (trimmedPath.startsWith('json.')) {
+    else if (trimmedPath.startsWith('json.')) {
       const jsonPath = trimmedPath.substring(5); // Remove 'json.' prefix
-      const value = getNestedValue(jsonData, jsonPath);
-      if (value !== null && value !== undefined) {
-        return String(value);
+      resolvedValue = getNestedValue(jsonData, jsonPath);
+      if (resolvedValue !== null && resolvedValue !== undefined) {
+        resolved = true;
       }
-      return match; // Path not found, return original
     }
-    
     // Try direct access first
-    if (flattenedContext[trimmedPath] !== undefined) {
-      const value = flattenedContext[trimmedPath];
-      return value !== null && value !== undefined ? String(value) : match;
+    else if (flattenedContext[trimmedPath] !== undefined) {
+      resolvedValue = flattenedContext[trimmedPath];
+      if (resolvedValue !== null && resolvedValue !== undefined) {
+        resolved = true;
+      }
     }
-    
     // Try dot notation (e.g., input.name)
-    const parts = trimmedPath.split('.');
-    let current: unknown = enrichedContext;
-    
-    for (const part of parts) {
-      if (current && typeof current === 'object' && !Array.isArray(current)) {
-        current = (current as Record<string, unknown>)[part];
-      } else {
-        return match; // Path not found
+    else {
+      const parts = trimmedPath.split('.');
+      let current: unknown = enrichedContext;
+      
+      for (const part of parts) {
+        if (current && typeof current === 'object' && !Array.isArray(current)) {
+          current = (current as Record<string, unknown>)[part];
+        } else {
+          current = undefined;
+          break;
+        }
+      }
+      
+      if (current !== null && current !== undefined) {
+        resolvedValue = current;
+        resolved = true;
       }
     }
     
-    return current !== null && current !== undefined ? String(current) : match;
+    // If resolved, return the value
+    if (resolved && resolvedValue !== null && resolvedValue !== undefined) {
+      // Phase 3: Validate template value
+      const validation = validationMiddleware.validateTemplateValue(
+        match,
+        resolvedValue,
+        enrichedContext
+      );
+      
+      if (!validation.valid && validation.error) {
+        // Log validation warning but still return resolved value (non-strict mode)
+        console.warn(`[Template Validation] ${nodeId ? `Node ${nodeId}: ` : ''}${validation.error}`);
+      }
+      
+      return String(resolvedValue);
+    }
+    
+    // Path not found - Phase 3: Provide helpful suggestions
+    if (process.env.NODE_ENV === 'development' || process.env.VALIDATE_TEMPLATES !== 'false') {
+      const availableFields = Object.keys(flattenedContext).slice(0, 20); // Limit for performance
+      const suggestions = findSimilarFields(trimmedPath, availableFields);
+      
+      let errorMessage = `Template '${match}' references non-existent field '${trimmedPath}'`;
+      
+      if (suggestions.length > 0) {
+        errorMessage += `. Did you mean: ${suggestions.map(s => `{{${s}}}`).join(', ')}?`;
+      } else if (availableFields.length > 0) {
+        errorMessage += `. Available fields: ${availableFields.slice(0, 5).join(', ')}${availableFields.length > 5 ? '...' : ''}`;
+      }
+      
+      // Log helpful error message
+      console.warn(`[Template Validation] ${nodeId ? `Node ${nodeId}: ` : ''}${errorMessage}`);
+      
+      // In strict mode, throw error
+      if (process.env.VALIDATION_STRICT === 'true') {
+        throw new Error(errorMessage);
+      }
+    }
+    
+    // Return original template if not resolved (backward compatibility)
+    return match;
   });
 }
 
@@ -212,15 +303,33 @@ function resolveTemplate(template: string, context: Record<string, unknown>): st
 export async function executeNode(
   node: WorkflowNode,
   input: unknown,
-  nodeOutputs: Record<string, unknown>,
-  supabase: any,
+  nodeOutputs: LRUNodeOutputsCache,
+  supabase: SupabaseClient,
   workflowId: string,
-  userId?: string
+  userId?: string,
+  currentUserId?: string
 ): Promise<unknown> {
   const { type, config } = node.data;
   const inputObj = extractInputObject(input);
 
   console.log(`Executing node: ${node.data.label} (${type})`);
+
+  // Phase 3: Validate node configuration before execution
+  const configValidation = validationMiddleware.validateConfig(type, config, node.id);
+  if (!configValidation.success && configValidation.error) {
+    const errorMessage = configValidation.error.message;
+    console.warn(`[Validation] ${errorMessage}`);
+    
+    // In strict mode, return error immediately
+    if (process.env.VALIDATION_STRICT === 'true') {
+      return {
+        ...inputObj,
+        _error: `Configuration validation failed: ${errorMessage}`,
+        _validationError: true,
+      };
+    }
+    // In non-strict mode, log warning and continue (backward compatibility)
+  }
 
   // Handle different node types
   switch (type) {
@@ -250,7 +359,7 @@ export async function executeNode(
       const value = getStringProperty(config, 'value', '');
       // Build context with $json and json aliases
       const context = {
-        ...nodeOutputs,
+        ...nodeOutputs.getAll(),
         input: inputObj,
         $json: inputObj,
         json: inputObj,
@@ -265,45 +374,37 @@ export async function executeNode(
       // Set node: Sets fields in output object
       // Config: { fields: '{"name": "{{input.name}}", "age": 25}' }
       const fieldsJson = getStringProperty(config, 'fields', '{}');
-      try {
-        const fields = JSON.parse(fieldsJson);
-        const resolvedFields: Record<string, unknown> = {};
-        
-        // Build context with input and all previous node outputs
-        // Ensure $json and json point to input data (for {{$json.value1}} syntax)
-        const context = {
-          input: inputObj,
-          ...nodeOutputs,
-          ...inputObj, // Also add input properties directly
-          // Add $json and json aliases for n8n-style template syntax
-          $json: inputObj,
-          json: inputObj,
-        };
-        
-        // Resolve template expressions in field values
-        for (const [key, value] of Object.entries(fields)) {
-          if (typeof value === 'string') {
-            const resolved = resolveTemplate(value, context);
-            // Try to parse as number if it looks like one
-            const numValue = parseFloat(resolved);
-            resolvedFields[key] = !isNaN(numValue) && resolved.trim() === String(numValue) ? numValue : resolved;
-          } else {
-            resolvedFields[key] = value;
-          }
+      const fields = safeParse<Record<string, unknown>>(fieldsJson, {}) || {};
+      const resolvedFields: Record<string, unknown> = {};
+      
+      // Build context with input and all previous node outputs
+      // Ensure $json and json point to input data (for {{$json.value1}} syntax)
+      const context = {
+        input: inputObj,
+        ...nodeOutputs.getAll(),
+        ...inputObj, // Also add input properties directly
+        // Add $json and json aliases for n8n-style template syntax
+        $json: inputObj,
+        json: inputObj,
+      };
+      
+      // Resolve template expressions in field values
+      for (const [key, value] of Object.entries(fields)) {
+        if (typeof value === 'string') {
+          const resolved = resolveTemplate(value, context, node.id);
+          // Try to parse as number if it looks like one
+          const numValue = parseFloat(resolved);
+          resolvedFields[key] = !isNaN(numValue) && resolved.trim() === String(numValue) ? numValue : resolved;
+        } else {
+          resolvedFields[key] = value;
         }
-        
-        // Merge with input
-        return {
-          ...inputObj,
-          ...resolvedFields,
-        };
-      } catch (error) {
-        console.error('Set node: Invalid fields JSON:', error);
-        return {
-          ...inputObj,
-          _error: 'Invalid fields JSON in Set node',
-        };
       }
+      
+      // Merge with input
+      return {
+        ...inputObj,
+        ...resolvedFields,
+      };
     }
 
     case 'math': {
@@ -318,7 +419,7 @@ export async function executeNode(
       // Ensure $json and json point to input data (for {{$json.value1}} syntax)
       const context = {
         input: inputObj,
-        ...nodeOutputs,
+        ...nodeOutputs.getAll(),
         ...inputObj, // Also add input properties directly
         // Add $json and json aliases for n8n-style template syntax
         $json: inputObj,
@@ -429,14 +530,14 @@ export async function executeNode(
       // Ensure $json and json point to input data (for {{$json.value1}} syntax)
       const context = {
         input: inputObj,
-        ...nodeOutputs,
+        ...nodeOutputs.getAll(),
         ...inputObj, // Also add input properties directly
         // Add $json and json aliases for n8n-style template syntax
         $json: inputObj,
         json: inputObj,
       };
       
-      const resolvedMessage = resolveTemplate(message, context);
+      const resolvedMessage = resolveTemplate(message, context, node.id);
       
       // Log to console with appropriate level
       const logPrefix = `[LOG ${level.toUpperCase()}]`;
@@ -474,12 +575,12 @@ export async function executeNode(
       
       // Build context with $json and json aliases
       const context = {
-        ...nodeOutputs,
+        ...nodeOutputs.getAll(),
         input: inputObj,
         $json: inputObj,
         json: inputObj,
       };
-      const resolvedPrompt = resolveTemplate(prompt, context);
+      const resolvedPrompt = resolveTemplate(prompt, context, node.id);
       
       const llmAdapter = new LLMAdapter();
       const response = await llmAdapter.chat(provider, [
@@ -541,7 +642,7 @@ export async function executeNode(
       
       // Add system prompt
       const context = {
-        ...nodeOutputs,
+        ...nodeOutputs.getAll(),
         input: inputObj,
         $json: inputObj,
         json: inputObj,
@@ -706,13 +807,13 @@ export async function executeNode(
       // Build context for template resolution
       const context = {
         input: inputObj,
-        ...nodeOutputs,
+        ...nodeOutputs.getAll(),
         ...inputObj,
         $json: inputObj,
         json: inputObj,
       };
 
-      const resolvedUrl = resolveTemplate(url, context);
+      const resolvedUrl = resolveTemplate(url, context, node.id);
       let headers: Record<string, string> = {};
       let body: string | undefined;
 
@@ -784,6 +885,7 @@ export async function executeNode(
 
     case 'javascript': {
       // JavaScript code execution node
+      // SECURITY FIX: Replaced eval() with vm2 sandbox for secure execution
       const code = getStringProperty(config, 'code', '');
       
       if (!code) {
@@ -793,15 +895,6 @@ export async function executeNode(
         };
       }
 
-      // Build context for code execution
-      const context = {
-        input: inputObj,
-        ...nodeOutputs,
-        ...inputObj,
-        $json: inputObj,
-        json: inputObj,
-      };
-
       // Security: Check if JavaScript execution is enabled
       if (process.env.DISABLE_JAVASCRIPT_NODE === 'true') {
         return {
@@ -810,23 +903,90 @@ export async function executeNode(
         };
       }
 
+      // Get timeout from config (default 5 seconds)
+      const timeout = parseInt(getStringProperty(config, 'timeout', '5000'), 10) || 5000;
+      
+      // Enforce maximum timeout limit (30 seconds)
+      const maxTimeout = 30000;
+      const safeTimeout = Math.min(timeout, maxTimeout);
+
       try {
-        // Create a safe execution context
-        // WARNING: Using eval is a security risk. In production, consider:
-        // 1. Using vm2 or isolated-vm for sandboxing
-        // 2. Disabling JavaScript nodes entirely (set DISABLE_JAVASCRIPT_NODE=true)
-        // 3. Implementing code validation and sanitization
-        if (process.env.NODE_ENV === 'production') {
-          console.warn('[Security] JavaScript node execution in production - consider using vm2 or isolated-vm');
-        }
+        // Import vm2 for secure sandboxing
+        const { VM } = require('vm2');
         
+        // Create vm2 sandbox with strict security settings
+        const vm = new VM({
+          timeout: safeTimeout, // Execution timeout in milliseconds
+          sandbox: {
+            // Safe context variables (read-only copies)
+            input: (() => {
+              try {
+                return JSON.parse(JSON.stringify(inputObj)); // Deep clone
+              } catch {
+                return inputObj; // Fallback if cloning fails
+              }
+            })(),
+            $json: (() => {
+              try {
+                return JSON.parse(JSON.stringify(inputObj)); // Deep clone
+              } catch {
+                return inputObj; // Fallback if cloning fails
+              }
+            })(),
+            json: (() => {
+              try {
+                return JSON.parse(JSON.stringify(inputObj)); // Deep clone
+              } catch {
+                return inputObj; // Fallback if cloning fails
+              }
+            })(),
+            
+            // Read-only access to nodeOutputs via getter function
+            // This prevents direct modification of nodeOutputs
+            getNodeOutput: (nodeId: string) => {
+              const output = nodeOutputs.get(nodeId);
+              if (output === null || output === undefined) {
+                return undefined;
+              }
+              try {
+                // Return deep clone to prevent modification
+                // Note: We keep the existing deep clone logic here even though cache has cloneOnGet option
+                // This ensures consistent behavior and handles edge cases
+                return JSON.parse(JSON.stringify(output));
+              } catch {
+                // If circular reference or non-serializable, return undefined
+                return undefined;
+              }
+            },
+            
+            // Safe built-in objects
+            Math: Math,
+            JSON: JSON,
+            Date: Date,
+            Array: Array,
+            Object: Object,
+            String: String,
+            Number: Number,
+            Boolean: Boolean,
+            RegExp: RegExp,
+            
+            // Limited console for debugging
+            console: {
+              log: (...args: unknown[]) => console.log('[JS Node]', ...args),
+              error: (...args: unknown[]) => console.error('[JS Node]', ...args),
+              warn: (...args: unknown[]) => console.warn('[JS Node]', ...args),
+            },
+          },
+          
+          // Additional security settings
+          eval: false, // Disable eval() inside sandbox
+          wasm: false, // Disable WebAssembly
+          fixAsync: true, // Fix async/await support
+        });
+
+        // Wrap user code in IIFE to ensure proper return handling
         const wrappedCode = `
           (function() {
-            const input = ${JSON.stringify(inputObj)};
-            const $json = ${JSON.stringify(inputObj)};
-            const json = ${JSON.stringify(inputObj)};
-            const nodeOutputs = ${JSON.stringify(nodeOutputs)};
-            
             ${code}
             
             // If code doesn't return anything, return input
@@ -834,13 +994,44 @@ export async function executeNode(
           })()
         `;
 
-        const result = eval(wrappedCode);
+        // Execute code in sandbox
+        const result = vm.run(wrappedCode);
+        
+        // Log successful execution (for monitoring)
+        console.log(`[Security] JavaScript node executed successfully (timeout: ${safeTimeout}ms)`);
+        
         return result;
       } catch (error) {
+        // Provide detailed error information
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        
+        // Log security-related errors separately
+        if (errorMessage.includes('require') || 
+            errorMessage.includes('process') || 
+            errorMessage.includes('global') ||
+            errorMessage.includes('__dirname') ||
+            errorMessage.includes('__filename')) {
+          console.error('[Security] JavaScript node attempted to access restricted APIs:', errorMessage);
+          return {
+            ...inputObj,
+            _error: `Security violation: Code attempted to access restricted Node.js APIs. ${errorMessage}`,
+          };
+        }
+        
+        // Log timeout errors
+        if (errorMessage.includes('timeout') || errorMessage.includes('Script execution timed out')) {
+          console.error('[Security] JavaScript node execution timed out');
+          return {
+            ...inputObj,
+            _error: `Execution timeout: Code exceeded ${safeTimeout}ms execution limit`,
+          };
+        }
+        
+        // Handle other errors
         console.error('JavaScript execution error:', error);
         return {
           ...inputObj,
-          _error: error instanceof Error ? error.message : 'JavaScript execution failed',
+          _error: errorMessage,
         };
       }
     }
@@ -863,7 +1054,7 @@ export async function executeNode(
       // Build context
       const context = {
         input: inputObj,
-        ...nodeOutputs,
+        ...nodeOutputs.getAll(),
         ...inputObj,
         $json: inputObj,
         json: inputObj,
@@ -874,23 +1065,33 @@ export async function executeNode(
       const resolvedRange = range ? resolveTemplate(range, context) : undefined;
 
       try {
-        // Check if credentials are configured first
-        const hasCredentials = config.googleOAuthClientId && config.googleOAuthClientSecret;
+        // Get access token - try workflow owner first, then current user as fallback
+        // Note: Credentials (GOOGLE_OAUTH_CLIENT_ID/SECRET) are only needed for token refresh
+        // If tokens are already stored and valid, credentials are not required
+        const userIdsToTry: string[] = [];
+        if (userId) userIdsToTry.push(userId);
+        if (currentUserId && currentUserId !== userId) userIdsToTry.push(currentUserId);
         
-        if (!hasCredentials) {
-          return {
-            ...inputObj,
-            _error: 'Google Sheets node: Google OAuth credentials are not configured. Please configure GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET environment variables.',
-          };
-        }
-
-        // Get access token from user's OAuth tokens
-        const accessToken = userId ? await getGoogleAccessToken(supabase, userId) : null;
+        const accessToken = userIdsToTry.length > 0 
+          ? await getGoogleAccessToken(supabase, userIdsToTry) 
+          : null;
         
         if (!accessToken) {
+          const ownerMessage = userId 
+            ? `The workflow owner (user ${userId}) does not have a Google account connected.`
+            : 'No workflow owner found.';
+          const currentUserMessage = currentUserId && currentUserId !== userId
+            ? `The current user (user ${currentUserId}) also does not have a Google account connected.`
+            : '';
+          const solutionMessage = userId && currentUserId && currentUserId !== userId
+            ? 'Please ensure either: 1) The workflow owner connects their Google account in settings, or 2) You connect your Google account (if you have permission to use it for this workflow).'
+            : userId
+            ? 'Please ensure the workflow owner has connected their Google account in settings. If you\'re running someone else\'s workflow, you need to either: 1) Have the workflow owner connect their Google account, or 2) Transfer the workflow ownership to your account.'
+            : 'Please connect a Google account in settings.';
+          
           return {
             ...inputObj,
-            _error: 'Google Sheets node: No Google OAuth token found. Please authenticate with Google first.',
+            _error: `Google Sheets: OAuth token not found. ${ownerMessage} ${currentUserMessage} ${solutionMessage}`,
           };
         }
 
@@ -995,7 +1196,7 @@ export async function executeNode(
       // Build context
       const context = {
         input: inputObj,
-        ...nodeOutputs,
+        ...nodeOutputs.getAll(),
         ...inputObj,
         $json: inputObj,
         json: inputObj,
@@ -1031,12 +1232,11 @@ export async function executeNode(
       // LinkedIn API node
       const operation = getStringProperty(config, 'operation', 'post');
       const text = getStringProperty(config, 'text', '');
-      const accessToken = getStringProperty(config, 'accessToken', '') || process.env.LINKEDIN_ACCESS_TOKEN || '';
-
+      
       // Build context
       const context = {
         input: inputObj,
-        ...nodeOutputs,
+        ...nodeOutputs.getAll(),
         ...inputObj,
         $json: inputObj,
         json: inputObj,
@@ -1051,10 +1251,42 @@ export async function executeNode(
         };
       }
 
+      // Get access token - try from config first, then from database (OAuth), then from env
+      let accessToken = getStringProperty(config, 'accessToken', '');
+      
+      // If no token in config, try to get from database (OAuth tokens)
       if (!accessToken) {
+        const { getLinkedInAccessToken } = await import('../shared/linkedin-oauth');
+        const userIdsToTry: string[] = [];
+        if (userId) userIdsToTry.push(userId);
+        if (currentUserId && currentUserId !== userId) userIdsToTry.push(currentUserId);
+        
+        accessToken = userIdsToTry.length > 0 
+          ? await getLinkedInAccessToken(supabase, userIdsToTry) || ''
+          : '';
+      }
+      
+      // Fallback to environment variable if still no token
+      if (!accessToken) {
+        accessToken = process.env.LINKEDIN_ACCESS_TOKEN || '';
+      }
+
+      if (!accessToken) {
+        const ownerMessage = userId 
+          ? `The workflow owner (user ${userId}) does not have a LinkedIn account connected.`
+          : 'No workflow owner found.';
+        const currentUserMessage = currentUserId && currentUserId !== userId
+          ? `The current user (user ${currentUserId}) also does not have a LinkedIn account connected.`
+          : '';
+        const solutionMessage = userId && currentUserId && currentUserId !== userId
+          ? 'Please ensure either: 1) The workflow owner connects their LinkedIn account in settings, or 2) You connect your LinkedIn account (if you have permission to use it for this workflow).'
+          : userId
+          ? 'Please ensure the workflow owner has connected their LinkedIn account in settings. If you\'re running someone else\'s workflow, you need to either: 1) Have the workflow owner connect their LinkedIn account, or 2) Transfer the workflow ownership to your account.'
+          : 'Please connect a LinkedIn account in settings or configure an access token in node settings.';
+        
         return {
           ...inputObj,
-          _error: 'LinkedIn node: Access token is required. Set LINKEDIN_ACCESS_TOKEN environment variable or configure in node settings.',
+          _error: `LinkedIn: Access token not found. ${ownerMessage} ${currentUserMessage} ${solutionMessage}`,
         };
       }
 
@@ -1135,6 +1367,40 @@ export default async function executeWorkflowHandler(req: Request, res: Response
 
   let executionId: string | undefined;
   let logs: ExecutionLog[] = [];
+  let currentUserId: string | undefined;
+
+  // Extract current user from Authorization header (if available)
+  // This is optional - workflow can execute without it
+  try {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.replace('Bearer ', '').trim();
+      if (token) {
+        try {
+          const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+          if (!authError && user) {
+            currentUserId = user.id;
+            console.log(`[Execute Workflow] Current user: ${currentUserId}`);
+          } else if (authError) {
+            // Log auth error but don't fail - workflow can still execute
+            console.log(`[Execute Workflow] Auth error (non-fatal): ${authError.message || 'Unknown auth error'}`);
+          }
+        } catch (authErr: any) {
+          // Handle network/connection errors gracefully
+          const errorMsg = authErr?.message || 'Unknown error';
+          if (errorMsg.includes('ENOTFOUND') || errorMsg.includes('fetch failed')) {
+            console.log('[Execute Workflow] Supabase connection issue - continuing without current user ID');
+          } else {
+            console.log(`[Execute Workflow] Auth extraction error (non-fatal): ${errorMsg}`);
+          }
+        }
+      }
+    }
+  } catch (error: any) {
+    // Auth is optional - workflow can still execute without it
+    const errorMsg = error?.message || 'Unknown error';
+    console.log(`[Execute Workflow] Auth extraction failed (non-fatal): ${errorMsg}`);
+  }
 
   try {
     // Fetch workflow
@@ -1146,7 +1412,25 @@ export default async function executeWorkflowHandler(req: Request, res: Response
 
     if (workflowError || !workflow) {
       console.error('Workflow fetch error:', workflowError);
-      return res.status(404).json({ error: 'Workflow not found' });
+      
+      // Check if it's a Supabase connection error
+      const errorMessage = workflowError?.message || String(workflowError || '');
+      if (errorMessage.includes('ENOTFOUND') || 
+          errorMessage.includes('fetch failed') || 
+          errorMessage.includes('your-project-id')) {
+        return res.status(500).json({ 
+          error: 'Database configuration error',
+          message: 'Supabase URL is not configured correctly. Please update SUPABASE_URL in your .env file with your actual Supabase project URL.',
+          hint: 'Current URL appears to be a placeholder: your-project-id.supabase.co',
+          details: 'The workflow cannot be fetched because the database connection is misconfigured.'
+        });
+      }
+      
+      return res.status(404).json({ 
+        error: 'Workflow not found',
+        message: workflowError?.message || 'The specified workflow could not be found.',
+        workflowId 
+      });
     }
 
     const nodes = workflow.nodes as WorkflowNode[];
@@ -1206,9 +1490,29 @@ export default async function executeWorkflowHandler(req: Request, res: Response
     
     // CRITICAL: State management - nodeOutputs stores outputs from each node
     // This is the key to state propagation between nodes
-    const nodeOutputs: Record<string, unknown> = { trigger: input };
+    // Using LRU cache to prevent unbounded memory growth
+    let cacheSize = parseInt(process.env.NODE_OUTPUTS_CACHE_SIZE || '100', 10);
+    if (isNaN(cacheSize) || cacheSize <= 0) {
+      console.warn(`[Memory] Invalid NODE_OUTPUTS_CACHE_SIZE: ${process.env.NODE_OUTPUTS_CACHE_SIZE}, using default 100`);
+      cacheSize = 100;
+    }
+    
+    const nodeOutputs = new LRUNodeOutputsCache(cacheSize, false); // cloneOnGet=false for template resolution
+    nodeOutputs.set('trigger', input, true); // Mark trigger as persistent
+    
+    // Warn if cache size may be too small for workflow
+    if (nodes.length > 0 && cacheSize < nodes.length * 0.5) {
+      console.warn(
+        `[Memory] Cache size (${cacheSize}) may be too small for workflow with ${nodes.length} nodes. ` +
+        `Consider increasing NODE_OUTPUTS_CACHE_SIZE to at least ${Math.ceil(nodes.length * 0.8)}`
+      );
+    }
+    
     const ifElseResults: Record<string, boolean> = {};
     const switchResults: Record<string, string | null> = {};
+    
+    // Track memory usage for monitoring
+    const startMemory = process.memoryUsage().heapUsed / 1024 / 1024; // MB
 
     // Build execution order (topological sort)
     const allNodes = topologicalSort(nodes, edges);
@@ -1233,17 +1537,23 @@ export default async function executeWorkflowHandler(req: Request, res: Response
           
           // Restore node outputs from logs if available
           if (execData.logs && Array.isArray(execData.logs)) {
+            const restoredOutputs: Record<string, unknown> = {};
             execData.logs.forEach((log: any) => {
               if (log.output !== undefined && log.nodeId) {
-                nodeOutputs[log.nodeId] = log.output;
+                restoredOutputs[log.nodeId] = log.output;
               }
             });
+            // Use warm() to restore all entries at once with same timestamp
+            if (Object.keys(restoredOutputs).length > 0) {
+              nodeOutputs.warm(restoredOutputs);
+              console.log(`[Resume] Restored ${Object.keys(restoredOutputs).length} node outputs from logs`);
+            }
           }
           
           // Set form node output to the form submission data (from execution input)
           if (execData.input && formNodeIndex >= 0) {
             const formNode = executionOrder[formNodeIndex];
-            nodeOutputs[formNode.id] = execData.input;
+            nodeOutputs.set(formNode.id, execData.input);
             console.log(`[Resume] Set form node output from submission data`);
           }
         }
@@ -1280,21 +1590,30 @@ export default async function executeWorkflowHandler(req: Request, res: Response
           const portInputs: Record<string, unknown> = {};
           
           inputEdges.forEach(edge => {
-            const sourceOutput = nodeOutputs[edge.source];
-            if (sourceOutput !== undefined) {
-              const targetHandle = edge.targetHandle || 'default';
-              
-              // Map port handles to input structure
-              if (targetHandle === 'chat_model') {
-                portInputs.chat_model = sourceOutput;
-              } else if (targetHandle === 'memory') {
-                portInputs.memory = sourceOutput;
-              } else if (targetHandle === 'tool') {
-                portInputs.tool = sourceOutput;
-              } else {
-                // Default port or no handle specified - treat as user input
-                portInputs.userInput = sourceOutput;
+            const sourceOutput = nodeOutputs.get(edge.source);
+            if (sourceOutput === undefined) {
+              const nodeExists = nodes.some(n => n.id === edge.source);
+              if (nodeExists) {
+                console.warn(
+                  `[Memory] Output for node "${edge.source}" not found (may have been evicted). ` +
+                  `Cache size: ${nodeOutputs.getStats().maxSize}, current size: ${nodeOutputs.getStats().size}`
+                );
               }
+              return; // Skip this source
+            }
+            
+            const targetHandle = edge.targetHandle || 'default';
+            
+            // Map port handles to input structure
+            if (targetHandle === 'chat_model') {
+              portInputs.chat_model = sourceOutput;
+            } else if (targetHandle === 'memory') {
+              portInputs.memory = sourceOutput;
+            } else if (targetHandle === 'tool') {
+              portInputs.tool = sourceOutput;
+            } else {
+              // Default port or no handle specified - treat as user input
+              portInputs.userInput = sourceOutput;
             }
           });
           
@@ -1303,23 +1622,53 @@ export default async function executeWorkflowHandler(req: Request, res: Response
         } else if (inputEdges.length > 0) {
           // Standard node input handling
           const sourceNodeId = inputEdges[0].source;
-          const sourceOutput = nodeOutputs[sourceNodeId];
+          const sourceOutput = nodeOutputs.get(sourceNodeId);
           
           if (sourceOutput !== undefined) {
             nodeInput = sourceOutput;
-          } else if (inputEdges.length > 1) {
+          } else {
+            // Cache miss - check if node exists
+            const nodeExists = nodes.some(n => n.id === sourceNodeId);
+            if (nodeExists) {
+              throw new Error(
+                `Output for node "${sourceNodeId}" not found (may have been evicted from cache). ` +
+                `Consider increasing NODE_OUTPUTS_CACHE_SIZE (current: ${nodeOutputs.getStats().maxSize})`
+              );
+            }
+            // Node doesn't exist - use input as fallback
+            nodeInput = input;
+          }
+          
+          if (inputEdges.length > 1) {
             // Multiple inputs - merge them
             nodeInput = inputEdges.reduce((acc, edge) => {
-              const sourceOutput = nodeOutputs[edge.source];
+              const sourceOutput = nodeOutputs.get(edge.source);
               if (sourceOutput !== undefined) {
                 return { ...extractInputObject(acc), ...extractInputObject(sourceOutput) };
+              } else {
+                // Cache miss - log warning but continue
+                console.warn(`[Workflow ${workflowId}] [Node ${node.id}] Output for node "${edge.source}" not found, skipping merge`);
               }
               return acc;
-            }, {});
+            }, nodeInput);
           }
         }
 
         log.input = nodeInput;
+        
+        // Update execution logs when node starts running so frontend can see it immediately
+        if (executionId) {
+          try {
+            const runningLogs = [...logs, log];
+            await supabase
+              .from('executions')
+              .update({ logs: runningLogs })
+              .eq('id', executionId);
+          } catch (logUpdateError) {
+            // Log error but don't break execution
+            console.error(`[Workflow ${workflowId}] [Node ${node.id}] Failed to update execution logs:`, logUpdateError);
+          }
+        }
 
         // Handle form nodes - pause execution and wait for form submission
         // Check BEFORE executing the node to avoid unnecessary work
@@ -1436,12 +1785,13 @@ export default async function executeWorkflowHandler(req: Request, res: Response
           nodeOutputs,
           supabase,
           workflowId,
-          workflow.user_id
+          workflow.user_id,
+          currentUserId
         );
 
         // CRITICAL: Store output in nodeOutputs for state propagation
         // This allows subsequent nodes to access this node's output
-        nodeOutputs[node.id] = output;
+        nodeOutputs.set(node.id, output);
         finalOutput = output;
 
         // Handle If/Else and Switch nodes
@@ -1463,10 +1813,10 @@ export default async function executeWorkflowHandler(req: Request, res: Response
         log.status = 'success';
         log.finishedAt = new Date().toISOString();
       } catch (error) {
-        console.error(`Node ${node.data.label} ERROR:`, error);
+        const errorObj = error instanceof Error ? error : new Error(String(error));
+        console.error(`[Workflow ${workflowId}] [Node ${node.id}] [${node.data.label}] ERROR:`, errorObj.message, errorObj);
         
         log.status = 'failed';
-        const errorObj = error instanceof Error ? error : new Error(String(error));
         log.error = errorObj.message;
         log.finishedAt = new Date().toISOString();
         hasError = true;
@@ -1493,7 +1843,7 @@ export default async function executeWorkflowHandler(req: Request, res: Response
                 workflow.user_id
               );
             } catch (errorTriggerError) {
-              console.error('Error trigger execution failed:', errorTriggerError);
+              console.error(`[Workflow ${workflowId}] [Error Trigger ${errorTriggerNode.id}] Execution failed:`, errorTriggerError);
             }
           }
         }
@@ -1503,7 +1853,41 @@ export default async function executeWorkflowHandler(req: Request, res: Response
       }
 
       logs.push(log);
+      
+      // Update execution logs incrementally so frontend can see progress in real-time
+      if (executionId) {
+        try {
+          await supabase
+            .from('executions')
+            .update({ logs })
+            .eq('id', executionId);
+        } catch (logUpdateError) {
+          // Log error but don't break execution - logs will be saved at the end anyway
+          console.error('Failed to update execution logs incrementally:', logUpdateError);
+        }
+      }
     }
+
+    // Log cache statistics and memory usage before cleanup
+    const endMemory = process.memoryUsage().heapUsed / 1024 / 1024; // MB
+    const memoryDelta = endMemory - startMemory;
+    
+    if (process.env.ENABLE_MEMORY_LOGGING === 'true') {
+      const stats = nodeOutputs.getStats();
+      console.log(`[Memory] Workflow ${workflowId} cache stats:`, {
+        size: stats.size,
+        maxSize: stats.maxSize,
+        hits: stats.hits,
+        misses: stats.misses,
+        hitRate: `${(stats.hitRate * 100).toFixed(1)}%`,
+        evictions: stats.evictions,
+      });
+      console.log(`[Memory] Workflow ${workflowId} memory: ${startMemory.toFixed(2)}MB → ${endMemory.toFixed(2)}MB (Δ${memoryDelta.toFixed(2)}MB)`);
+    }
+    
+    // Clear cache when workflow completes (success or failure)
+    // This prevents memory leaks from long-running processes
+    nodeOutputs.clear();
 
     // Update execution with final status
     const finishedAt = new Date().toISOString();
@@ -1556,8 +1940,9 @@ export default async function executeWorkflowHandler(req: Request, res: Response
       durationMs,
     });
   } catch (error) {
-    console.error('Execute workflow error:', error);
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorObj = error instanceof Error ? error : new Error(String(error));
+    console.error(`[Workflow ${req.body.workflowId || 'unknown'}] Execute workflow error:`, errorObj.message, errorObj);
+    const errorMessage = errorObj.message;
     
     return res.status(500).json({
       error: errorMessage,

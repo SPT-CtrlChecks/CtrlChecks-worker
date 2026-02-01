@@ -20,18 +20,20 @@ export function getSupabaseClient(): SupabaseClient {
   
   if (!hasUrl || !hasKey) {
     const missing = [];
-    if (!hasUrl) missing.push('SUPABASE_URL');
-    if (!hasKey) missing.push('SUPABASE_SERVICE_ROLE_KEY');
+    if (!hasUrl) missing.push('SUPABASE_URL or VITE_SUPABASE_URL');
+    if (!hasKey) missing.push('SUPABASE_SERVICE_ROLE_KEY or VITE_SUPABASE_SERVICE_ROLE_KEY');
     
     console.error('\n❌ Supabase configuration error:');
     console.error(`   Missing: ${missing.join(', ')}`);
-    console.error(`   SUPABASE_URL: ${hasUrl ? '✓ Set' : '✗ Missing'}`);
-    console.error(`   SUPABASE_SERVICE_ROLE_KEY: ${hasKey ? '✓ Set' : '✗ Missing'}`);
+    console.error(`   SUPABASE_URL/VITE_SUPABASE_URL: ${hasUrl ? '✓ Set' : '✗ Missing'}`);
+    console.error(`   SUPABASE_SERVICE_ROLE_KEY/VITE_SUPABASE_SERVICE_ROLE_KEY: ${hasKey ? '✓ Set' : '✗ Missing'}`);
     console.error('\n💡 Make sure you have a .env file in the worker directory with:');
     console.error('   SUPABASE_URL=https://your-project.supabase.co');
-    console.error('   SUPABASE_SERVICE_ROLE_KEY=your-service-role-key\n');
+    console.error('   OR VITE_SUPABASE_URL=https://your-project.supabase.co');
+    console.error('   SUPABASE_SERVICE_ROLE_KEY=your-service-role-key');
+    console.error('   OR VITE_SUPABASE_SERVICE_ROLE_KEY=your-service-role-key\n');
     
-    throw new Error(`Supabase URL and Service Role Key are required. Missing: ${missing.join(', ')}. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables.`);
+    throw new Error(`Supabase URL and Service Role Key are required. Missing: ${missing.join(', ')}. Set SUPABASE_URL (or VITE_SUPABASE_URL) and SUPABASE_SERVICE_ROLE_KEY (or VITE_SUPABASE_SERVICE_ROLE_KEY) environment variables.`);
   }
 
   supabaseClient = createClient(config.supabaseUrl, config.supabaseKey, {
