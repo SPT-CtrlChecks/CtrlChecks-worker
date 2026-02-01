@@ -8,6 +8,7 @@ import { ExecutionStateManager, NodeStatus } from './execution-state-manager';
 import { VisualizationService } from './visualization-service';
 import { executeNode } from '../../api/execute-workflow';
 import { getSupabaseClient } from '../../core/database/supabase-compat';
+import { LRUNodeOutputsCache } from '../../core/cache/lru-node-outputs-cache';
 
 export interface WorkflowNode {
   id: string;
@@ -33,7 +34,7 @@ export interface ExecutionContext {
   workflowId: string;
   userId?: string;
   input: unknown;
-  nodeOutputs: Record<string, unknown>;
+  nodeOutputs: LRUNodeOutputsCache;
   ifElseResults: Record<string, boolean>;
   switchResults: Record<string, string | null>;
 }
@@ -98,7 +99,11 @@ export class WorkflowOrchestrator extends EventEmitter {
       workflowId,
       userId,
       input,
-      nodeOutputs: { trigger: input },
+      nodeOutputs: (() => {
+        const cache = new LRUNodeOutputsCache();
+        // Set initial trigger output if needed
+        return cache;
+      })(),
       ifElseResults: {},
       switchResults: {},
     };
@@ -146,7 +151,7 @@ export class WorkflowOrchestrator extends EventEmitter {
         );
 
         // Store output
-        context.nodeOutputs[node.id] = nodeOutput;
+        context.nodeOutputs.set(node.id, nodeOutput);
         finalOutput = nodeOutput;
 
         // Update node status to success
@@ -280,13 +285,14 @@ export class WorkflowOrchestrator extends EventEmitter {
 
     if (inputEdges.length === 1) {
       const sourceNodeId = inputEdges[0].source;
-      return context.nodeOutputs[sourceNodeId] ?? context.input;
+      const sourceOutput = context.nodeOutputs.get(sourceNodeId);
+      return sourceOutput !== undefined ? sourceOutput : context.input;
     }
 
     // Multiple inputs - merge them
     const inputs: Record<string, unknown> = {};
     inputEdges.forEach(edge => {
-      const sourceOutput = context.nodeOutputs[edge.source];
+      const sourceOutput = context.nodeOutputs.get(edge.source);
       if (sourceOutput !== undefined) {
         const key = edge.sourceHandle || edge.source;
         inputs[key] = sourceOutput;
@@ -313,8 +319,9 @@ export class WorkflowOrchestrator extends EventEmitter {
       
       // Replace variables in condition
       let evaluatedCondition = condition;
-      Object.keys(context.nodeOutputs).forEach(key => {
-        const value = context.nodeOutputs[key];
+      const allOutputs = context.nodeOutputs.getAll();
+      Object.keys(allOutputs).forEach(key => {
+        const value = allOutputs[key];
         evaluatedCondition = evaluatedCondition.replace(
           new RegExp(`\\$\\{${key}\\}`, 'g'),
           JSON.stringify(value)
