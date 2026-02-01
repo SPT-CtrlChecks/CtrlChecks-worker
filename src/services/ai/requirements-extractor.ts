@@ -63,7 +63,7 @@ export class RequirementsExtractor {
         }
       );
 
-      return this.parseRequirementsResponse(response, systemPrompt);
+      return this.parseRequirementsResponse(response, systemPrompt, answers);
     } catch (error) {
       console.error('❌ Error extracting requirements:', error);
       return this.generateFallbackRequirements(systemPrompt);
@@ -122,6 +122,8 @@ Original User Prompt: "${userPrompt}"
 
 IMPORTANT: If user answers are provided, ONLY extract credentials for services that the user has SELECTED in their answers.
 For example, if user selected "OpenAI GPT" in their answers, extract "OpenAI API Key" but NOT "Anthropic API Key" or "Gemini API Key".
+
+CRITICAL: If the workflow uses AI Agent nodes or AI-generated content (detected from answers like "AI-generated content", "AI-generated", etc.), ALWAYS include "Google Gemini API Key" in credentials since AI Agent nodes default to Google Gemini.
 
 1. URLs & API Endpoints:
    - Any URLs mentioned (API endpoints, webhooks, services)
@@ -192,7 +194,8 @@ Return JSON in this exact format:
    */
   private parseRequirementsResponse(
     response: any,
-    systemPrompt: string
+    systemPrompt: string,
+    answers?: Record<string, string>
   ): ExtractedRequirements {
     try {
       // Extract JSON from response
@@ -212,6 +215,52 @@ Return JSON in this exact format:
 
       const parsed = JSON.parse(content);
 
+      // Normalize credentials first
+      const credentials = this.normalizeArray(parsed.credentials);
+      
+      // CRITICAL: Check if AI Agent/LLM functionality is needed and add Google Gemini API key
+      // This ensures AI Agent nodes always have the required credential
+      const systemPromptLower = systemPrompt.toLowerCase();
+      const answerValues = answers ? Object.values(answers).map(v => v.toLowerCase()) : [];
+      const answerTexts = answers ? Object.values(answers).join(' ').toLowerCase() : '';
+      
+      const hasAIFunctionality = 
+        systemPromptLower.includes('ai agent') ||
+        systemPromptLower.includes('ai assistant') ||
+        systemPromptLower.includes('chatbot') ||
+        systemPromptLower.includes('chat bot') ||
+        systemPromptLower.includes('llm') ||
+        systemPromptLower.includes('language model') ||
+        systemPromptLower.includes('ai-generated') ||
+        systemPromptLower.includes('ai generated') ||
+        systemPromptLower.includes('ai-generated content') ||
+        systemPromptLower.includes('generate') ||
+        systemPromptLower.includes('analyze') ||
+        systemPromptLower.includes('summarize') ||
+        systemPromptLower.includes('classify') ||
+        systemPromptLower.includes('sentiment') ||
+        systemPromptLower.includes('intent') ||
+        systemPromptLower.includes('natural language') ||
+        systemPromptLower.includes('nlp') ||
+        systemPromptLower.includes('text analysis') ||
+        systemPromptLower.includes('content generation') ||
+        systemPromptLower.includes('ai-powered') ||
+        systemPromptLower.includes('ai powered') ||
+        systemPromptLower.includes('using ai') ||
+        systemPromptLower.includes('with ai') ||
+        systemPromptLower.includes('ai model') ||
+        answerTexts.includes('ai-generated') ||
+        answerTexts.includes('ai generated') ||
+        answerTexts.includes('ai-generated content') ||
+        answerTexts.includes('ai content') ||
+        answerValues.some(v => v.includes('ai-generated') || v.includes('ai generated'));
+      
+      // If AI functionality detected and GEMINI_API_KEY not already in credentials, add it
+      if (hasAIFunctionality && !credentials.some(c => c.toLowerCase().includes('gemini') || c.toLowerCase().includes('google gemini'))) {
+        credentials.push('GEMINI_API_KEY');
+        console.log('🔑 AI functionality detected - added GEMINI_API_KEY to requirements');
+      }
+
       // Normalize and validate
       return {
         primaryGoal: parsed.primaryGoal || this.extractPrimaryGoal(systemPrompt),
@@ -222,7 +271,7 @@ Return JSON in this exact format:
         complexity: this.normalizeComplexity(parsed.complexity),
         urls: this.normalizeArray(parsed.urls),
         apis: this.normalizeArray(parsed.apis),
-        credentials: this.normalizeArray(parsed.credentials),
+        credentials: credentials,
         schedules: this.normalizeArray(parsed.schedules),
         dataFormats: this.normalizeArray(parsed.dataFormats),
         errorHandling: this.normalizeArray(parsed.errorHandling),
@@ -323,6 +372,40 @@ Return JSON in this exact format:
     if (lowerPrompt.includes('database') || lowerPrompt.includes('postgres') || lowerPrompt.includes('supabase')) {
       credentials.push('Database Credentials');
       platforms.push('Database');
+    }
+    
+    // CRITICAL: Detect AI functionality and add Google Gemini API key
+    // AI Agent nodes always require Google Gemini API key (default chat model)
+    const hasAIFunctionality = 
+      lowerPrompt.includes('ai agent') ||
+      lowerPrompt.includes('ai assistant') ||
+      lowerPrompt.includes('chatbot') ||
+      lowerPrompt.includes('chat bot') ||
+      lowerPrompt.includes('llm') ||
+      lowerPrompt.includes('language model') ||
+      lowerPrompt.includes('ai-generated') ||
+      lowerPrompt.includes('ai generated') ||
+      lowerPrompt.includes('ai-generated content') ||
+      lowerPrompt.includes('generate') ||
+      lowerPrompt.includes('analyze') ||
+      lowerPrompt.includes('summarize') ||
+      lowerPrompt.includes('classify') ||
+      lowerPrompt.includes('sentiment') ||
+      lowerPrompt.includes('intent') ||
+      lowerPrompt.includes('natural language') ||
+      lowerPrompt.includes('nlp') ||
+      lowerPrompt.includes('text analysis') ||
+      lowerPrompt.includes('content generation') ||
+      lowerPrompt.includes('ai-powered') ||
+      lowerPrompt.includes('ai powered') ||
+      lowerPrompt.includes('using ai') ||
+      lowerPrompt.includes('with ai') ||
+      lowerPrompt.includes('ai model');
+    
+    if (hasAIFunctionality && !credentials.some(c => c.toLowerCase().includes('gemini') || c.toLowerCase().includes('google gemini'))) {
+      credentials.push('GEMINI_API_KEY');
+      apis.push('Google Gemini API');
+      console.log('🔑 AI functionality detected in fallback - added GEMINI_API_KEY');
     }
 
     // Detect schedules

@@ -100,71 +100,23 @@ export class EnhancedWorkflowAnalyzer {
         text: this.formatNodePreferenceQuestion(option, formatted),
         options: formatted.options.map(opt => `${opt.icon} ${opt.label}`),
         nodeOptions: option.options,
-        helpText: formatted.recommendation || this.getNodeChoiceHelpText(option.category),
+        helpText: "", // No help text needed
         followUpQuestions: this.getFollowUpQuestionsForNode(option.category)
       };
     });
   }
   
   /**
-   * Format node preference question text
+   * Format node preference question text - Simplified, no explanations
    */
   private formatNodePreferenceQuestion(
     option: MultiNodeDetectionResult,
     formatted: any
   ): string {
-    const commonScenarios = this.getCommonScenariosForCategory(option.category);
-    
-    let questionText = formatted.question + '\n\n';
-    
-    // Add options with descriptions
-    formatted.options.forEach((opt: any) => {
-      questionText += `${opt.icon} **${opt.label}** - ${opt.description}\n`;
-      if (opt.bestFor && opt.bestFor.length > 0) {
-        questionText += `   Best for: ${opt.bestFor.join(', ')}\n`;
-      }
-    });
-    
-    if (commonScenarios) {
-      questionText += `\n${commonScenarios}\n`;
-    }
-    
-    if (formatted.recommendation) {
-      questionText += `\n${formatted.recommendation}\n`;
-    }
-    
-    return questionText.trim();
+    // Just return the question - no explanations, no descriptions, no recommendations
+    return formatted.question;
   }
   
-  /**
-   * Get common scenarios for category
-   */
-  private getCommonScenariosForCategory(category: string): string {
-    const scenarios: Record<string, string> = {
-      notification: "💡 Common use cases:\n- Slack: Team alerts, daily standups\n- Email: Customer notifications, reports\n- SMS: Urgent alerts, 2FA codes\n- Gmail: Business emails, Google Workspace integration",
-      database: "💡 Common use cases:\n- PostgreSQL: Complex queries, relational data\n- Supabase: Real-time apps, user management\n- MySQL: Web applications, content management",
-      file_storage: "💡 Common use cases:\n- S3: Large files, backups\n- Google Drive: Team collaboration\n- FTP: Legacy systems, file transfers",
-      authentication: "💡 Common use cases:\n- OAuth: Social login, third-party integration\n- API Key: Service-to-service\n- Basic Auth: Simple internal tools",
-      scheduling: "💡 Common use cases:\n- Schedule: Daily reports, regular syncs\n- Webhook: Real-time events, API callbacks\n- Manual: Testing, ad-hoc tasks"
-    };
-    
-    return scenarios[category] || "";
-  }
-  
-  /**
-   * Get help text for node choice
-   */
-  private getNodeChoiceHelpText(category: string): string {
-    const helpTexts: Record<string, string> = {
-      notification: "Consider who needs the notification, urgency, and existing tools your team uses.",
-      database: "Think about your data structure, team skills, and scalability needs.",
-      file_storage: "Consider file sizes, access patterns, and integration with other services.",
-      authentication: "Balance security needs with user experience and implementation complexity.",
-      scheduling: "Consider whether you need fixed times, event triggers, or manual control."
-    };
-    
-    return helpTexts[category] || "Choose the option that best fits your needs and existing infrastructure.";
-  }
   
   /**
    * Get follow-up questions based on selected node

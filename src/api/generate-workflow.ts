@@ -8,6 +8,123 @@ import { workflowAnalyzer } from '../services/ai/workflow-analyzer';
 import { enhancedWorkflowAnalyzer } from '../services/ai/enhanced-workflow-analyzer';
 import { requirementsExtractor } from '../services/ai/requirements-extractor';
 import { workflowValidator } from '../services/ai/workflow-validator';
+import { ExtractedRequirements } from '../services/ai/requirements-extractor';
+
+/**
+ * Identify required credentials from requirements and answers
+ * This is used in the refine step to determine which credentials will be needed
+ */
+function identifyRequiredCredentialsFromRequirements(
+  requirements: ExtractedRequirements,
+  userPrompt: string,
+  answers?: Record<string, string>
+): string[] {
+  const credentials: string[] = [];
+  const promptLower = userPrompt.toLowerCase();
+  const answerValues = answers ? Object.values(answers).map(v => String(v).toLowerCase()) : [];
+  const answerTexts = answers ? Object.values(answers).join(' ').toLowerCase() : '';
+  
+  console.log('🔍 [Backend] Identifying credentials:', { 
+    promptLower: promptLower.substring(0, 100), 
+    answerValues, 
+    answerTexts: answerTexts.substring(0, 200) 
+  });
+  
+  // Check if AI Agent/LLM functionality is needed
+  const hasAIFunctionality = 
+    promptLower.includes('ai agent') ||
+    promptLower.includes('ai assistant') ||
+    promptLower.includes('chatbot') ||
+    promptLower.includes('chat bot') ||
+    promptLower.includes('llm') ||
+    promptLower.includes('language model') ||
+    promptLower.includes('generate') ||
+    promptLower.includes('analyze') ||
+    promptLower.includes('summarize') ||
+    promptLower.includes('classify') ||
+    promptLower.includes('sentiment') ||
+    promptLower.includes('intent') ||
+    promptLower.includes('natural language') ||
+    promptLower.includes('nlp') ||
+    promptLower.includes('text analysis') ||
+    promptLower.includes('content generation') ||
+    promptLower.includes('ai-powered') ||
+    promptLower.includes('ai powered') ||
+    promptLower.includes('using ai') ||
+    promptLower.includes('with ai') ||
+    promptLower.includes('ai model') ||
+    answerTexts.includes('ai agent') ||
+    answerTexts.includes('ai assistant') ||
+    answerTexts.includes('chatbot') ||
+    answerTexts.includes('ai-generated') ||
+    answerTexts.includes('ai generated') ||
+    answerTexts.includes('ai-generated content') ||
+    answerTexts.includes('ai content') ||
+    answerValues.some(v => v.includes('ai-generated') || v.includes('ai generated'));
+  
+  console.log('🤖 [Backend] AI Functionality detected:', hasAIFunctionality);
+  
+  // Check for AI providers in answers
+  if (answerValues.some(v => v.includes('openai') || v.includes('gpt'))) {
+    credentials.push('OPENAI_API_KEY');
+    console.log('✅ [Backend] Added OPENAI_API_KEY');
+  } else if (answerValues.some(v => v.includes('claude') || v.includes('anthropic'))) {
+    credentials.push('ANTHROPIC_API_KEY');
+    console.log('✅ [Backend] Added ANTHROPIC_API_KEY');
+  } else if (answerValues.some(v => v.includes('gemini') || v.includes('google'))) {
+    credentials.push('GEMINI_API_KEY');
+    console.log('✅ [Backend] Added GEMINI_API_KEY (from provider selection)');
+  } else if (hasAIFunctionality) {
+    // If AI functionality is detected but no specific provider selected, default to Gemini
+    credentials.push('GEMINI_API_KEY');
+    console.log('✅ [Backend] Added GEMINI_API_KEY (default for AI functionality)');
+  }
+  
+  // Check requirements.credentials array
+  if (requirements.credentials && Array.isArray(requirements.credentials)) {
+    requirements.credentials.forEach((cred: any) => {
+      const credName = typeof cred === 'string' ? cred : (cred.name || cred.type || '');
+      if (credName && !credentials.includes(credName.toUpperCase())) {
+        credentials.push(credName.toUpperCase());
+      }
+    });
+  }
+  
+  // Check requirements.apis array
+  if (requirements.apis && Array.isArray(requirements.apis)) {
+    requirements.apis.forEach((api: any) => {
+      const apiName = typeof api === 'string' ? api : (api.name || api.endpoint || '');
+      const apiLower = apiName.toLowerCase();
+      if (apiLower.includes('openai') || apiLower.includes('gpt')) {
+        if (!credentials.includes('OPENAI_API_KEY')) credentials.push('OPENAI_API_KEY');
+      } else if (apiLower.includes('claude') || apiLower.includes('anthropic')) {
+        if (!credentials.includes('ANTHROPIC_API_KEY')) credentials.push('ANTHROPIC_API_KEY');
+      } else if (apiLower.includes('gemini') || apiLower.includes('google')) {
+        if (!credentials.includes('GEMINI_API_KEY')) credentials.push('GEMINI_API_KEY');
+      }
+    });
+  }
+  
+  // Check for platforms that might need credentials
+  if (requirements.platforms && Array.isArray(requirements.platforms)) {
+    requirements.platforms.forEach((platform: any) => {
+      const platformName = typeof platform === 'string' ? platform : (platform.name || platform.type || '');
+      const platformLower = platformName.toLowerCase();
+      if (platformLower.includes('slack')) {
+        if (!credentials.includes('SLACK_TOKEN')) credentials.push('SLACK_TOKEN');
+      } else if (platformLower.includes('discord')) {
+        if (!credentials.includes('DISCORD_WEBHOOK_URL')) credentials.push('DISCORD_WEBHOOK_URL');
+      } else if (platformLower.includes('google') && (platformLower.includes('sheet') || platformLower.includes('gmail') || platformLower.includes('drive'))) {
+        if (!credentials.includes('GOOGLE_OAUTH_CLIENT_ID')) credentials.push('GOOGLE_OAUTH_CLIENT_ID');
+        if (!credentials.includes('GOOGLE_OAUTH_CLIENT_SECRET')) credentials.push('GOOGLE_OAUTH_CLIENT_SECRET');
+      }
+    });
+  }
+  
+  const finalCredentials = [...new Set(credentials)]; // Remove duplicates
+  console.log('🎯 [Backend] Final identified credentials:', finalCredentials);
+  return finalCredentials;
+}
 
 export default async function generateWorkflow(req: Request, res: Response) {
   try {
@@ -44,20 +161,8 @@ export default async function generateWorkflow(req: Request, res: Response) {
             {
               id: 'q1',
               text: 'When should this workflow run?',
-              options: ['Only when I trigger it manually', 'Automatically on a schedule', 'When I receive data or an event', 'I\'m not sure yet'],
+              options: ['Fixed Schedule', 'Regular Intervals', 'Event Trigger', 'Manual Run'],
               category: 'schedule',
-            },
-            {
-              id: 'q2',
-              text: 'What should happen if the workflow encounters an error?',
-              options: ['Stop and notify me', 'Retry automatically', 'Continue with default values', 'Log the error and continue'],
-              category: 'error_handling',
-            },
-            {
-              id: 'q3',
-              text: 'Do you have existing accounts or credentials for the services this workflow needs?',
-              options: ['Yes, I have all credentials ready', 'Some credentials, but may need help', 'No credentials yet', 'Not sure what credentials are needed'],
-              category: 'authentication',
             },
           ],
           prompt: prompt,
@@ -87,10 +192,19 @@ export default async function generateWorkflow(req: Request, res: Response) {
           ? systemPromptWords.join(' ')
           : `${systemPromptWords.join(' ')}. Build an automated workflow to accomplish this task.`;
 
+        // Identify required credentials based on requirements and answers
+        const requiredCredentials = identifyRequiredCredentialsFromRequirements(requirements, prompt, answers);
+        
+        console.log('🔑 [Backend] Refine mode - Identified required credentials:', requiredCredentials);
+        console.log('📋 [Backend] Requirements:', JSON.stringify(requirements, null, 2));
+        console.log('💬 [Backend] Answers:', JSON.stringify(answers, null, 2));
+        console.log('📝 [Backend] Prompt:', prompt.substring(0, 200));
+
         return res.json({
           refinedPrompt: refinedPrompt,
           systemPrompt: systemPrompt,
           requirements: requirements,
+          requiredCredentials: requiredCredentials, // Add required credentials to response
           prompt: prompt,
         });
       } catch (error) {

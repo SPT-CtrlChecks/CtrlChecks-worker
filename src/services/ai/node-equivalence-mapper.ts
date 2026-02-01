@@ -143,7 +143,7 @@ export class NodeEquivalenceMapper {
         {
           id: "schedule",
           name: "Fixed Schedule",
-          description: "Run at specific times (e.g., 9 AM daily)",
+          description: "",
           icon: "⏰",
           requirements: ["Time specification", "Timezone"],
           nodeType: "schedule"
@@ -151,7 +151,7 @@ export class NodeEquivalenceMapper {
         {
           id: "interval",
           name: "Regular Intervals",
-          description: "Run every X minutes/hours",
+          description: "",
           icon: "🔄",
           requirements: ["Interval duration"],
           nodeType: "interval"
@@ -159,7 +159,7 @@ export class NodeEquivalenceMapper {
         {
           id: "webhook",
           name: "Event Trigger",
-          description: "Run when event occurs (webhook)",
+          description: "",
           icon: "🎯",
           requirements: ["Webhook endpoint"],
           nodeType: "webhook"
@@ -167,7 +167,7 @@ export class NodeEquivalenceMapper {
         {
           id: "manual",
           name: "Manual Run",
-          description: "Run when user clicks button",
+          description: "",
           icon: "▶️",
           requirements: ["User interface"],
           nodeType: "manual_trigger"
