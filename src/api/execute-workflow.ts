@@ -7,10 +7,12 @@ import { SupabaseClient } from '@supabase/supabase-js';
 import { config } from '../core/config';
 import { LLMAdapter } from '../shared/llm-adapter';
 import { HuggingFaceRouterClient } from '../shared/huggingface-client';
-import { getGoogleAccessToken } from '../shared/google-sheets';
+import { getGoogleAccessToken, executeGoogleSheetsOperation } from '../shared/google-sheets';
 import { LRUNodeOutputsCache } from '../core/cache/lru-node-outputs-cache';
 import { validationMiddleware } from '../core/validation/validation-middleware';
 import { safeParse, safeDeepClone } from '../shared/safe-json';
+import { getExecutionStateManager } from '../services/workflow-executor/execution-state-manager';
+import { VisualizationService } from '../services/workflow-executor/visualization-service';
 
 interface WorkflowNode {
   id: string;
@@ -203,6 +205,17 @@ function resolveTemplate(template: string, context: Record<string, unknown>, nod
       .map(s => s.field);
   }
   
+  // Also add all properties from jsonData directly to flattenedContext for direct access (e.g., {{rows}})
+  if (jsonData && typeof jsonData === 'object' && !Array.isArray(jsonData)) {
+    const inputData = jsonData as Record<string, unknown>;
+    for (const [key, value] of Object.entries(inputData)) {
+      // Only add if not already in flattenedContext to avoid overwriting
+      if (!(key in flattenedContext)) {
+        flattenedContext[key] = value;
+      }
+    }
+  }
+  
   // Support multiple template patterns: {{key}}, {{key.field}}, {{$json.path}}, {{input.path}}
   return template.replace(/\{\{([^}]+)\}\}/g, (match, path) => {
     const trimmedPath = path.trim();
@@ -225,11 +238,29 @@ function resolveTemplate(template: string, context: Record<string, unknown>, nod
         resolved = true;
       }
     }
-    // Try direct access first
+    // Handle input. syntax: {{input.property}} or {{input.nested.property}}
+    else if (trimmedPath.startsWith('input.')) {
+      const inputPath = trimmedPath.substring(6); // Remove 'input.' prefix
+      resolvedValue = getNestedValue(jsonData, inputPath);
+      if (resolvedValue !== null && resolvedValue !== undefined) {
+        resolved = true;
+      }
+    }
+    // Try direct access first (e.g., {{rows}}, {{message}})
     else if (flattenedContext[trimmedPath] !== undefined) {
       resolvedValue = flattenedContext[trimmedPath];
       if (resolvedValue !== null && resolvedValue !== undefined) {
         resolved = true;
+      }
+    }
+    // Try accessing from input object directly (e.g., {{rows}} might be input.rows)
+    else if (jsonData && typeof jsonData === 'object' && !Array.isArray(jsonData)) {
+      const inputData = jsonData as Record<string, unknown>;
+      if (inputData[trimmedPath] !== undefined) {
+        resolvedValue = inputData[trimmedPath];
+        if (resolvedValue !== null && resolvedValue !== undefined) {
+          resolved = true;
+        }
       }
     }
     // Try dot notation (e.g., input.name)
@@ -307,7 +338,7 @@ export async function executeNode(
   supabase: SupabaseClient,
   workflowId: string,
   userId?: string,
-  currentUserId?: string
+  fallbackUserId?: string // Optional: authenticated user's ID to try if workflow owner has no token
 ): Promise<unknown> {
   const { type, config } = node.data;
   const inputObj = extractInputObject(input);
@@ -523,21 +554,48 @@ export async function executeNode(
     case 'log_output': {
       // Log output node: Logs a message
       // Config: { message: 'Debug: {{input}}', level: 'info' }
-      const message = getStringProperty(config, 'message', '');
+      let message = getStringProperty(config, 'message', '');
       const level = getStringProperty(config, 'level', 'info');
+      
+      // Remove surrounding quotes if present (e.g., "Read {{rows}} rows" -> Read {{rows}} rows)
+      if ((message.startsWith('"') && message.endsWith('"')) || 
+          (message.startsWith("'") && message.endsWith("'"))) {
+        message = message.slice(1, -1);
+      }
       
       // Build context with input and all previous node outputs
       // Ensure $json and json point to input data (for {{$json.value1}} syntax)
       const context = {
         input: inputObj,
         ...nodeOutputs.getAll(),
-        ...inputObj, // Also add input properties directly
+        ...inputObj, // Also add input properties directly (rows, data, values, etc.)
         // Add $json and json aliases for n8n-style template syntax
         $json: inputObj,
         json: inputObj,
       };
       
+      // Debug: Log available fields for template resolution
+      if (message.includes('{{')) {
+        console.log(`[LOG_OUTPUT] Resolving template: "${message}"`);
+        console.log(`[LOG_OUTPUT] Available context keys:`, Object.keys(context).slice(0, 20)); // Limit to first 20
+        console.log(`[LOG_OUTPUT] Input object keys:`, Object.keys(inputObj).slice(0, 20));
+        if ('rows' in inputObj) {
+          console.log(`[LOG_OUTPUT] Found 'rows' field:`, inputObj.rows);
+        }
+      }
+      
       const resolvedMessage = resolveTemplate(message, context, node.id);
+      
+      // Debug: Log resolved message
+      if (message.includes('{{')) {
+        if (resolvedMessage !== message) {
+          console.log(`[LOG_OUTPUT] ✅ Resolved: "${resolvedMessage}"`);
+        } else {
+          console.log(`[LOG_OUTPUT] ❌ Template not resolved, original: "${message}"`);
+          console.log(`[LOG_OUTPUT] Available direct keys in context:`, 
+            Object.keys(context).filter(k => !['input', '$json', 'json'].includes(k)).slice(0, 10));
+        }
+      }
       
       // Log to console with appropriate level
       const logPrefix = `[LOG ${level.toUpperCase()}]`;
@@ -1037,21 +1095,25 @@ export async function executeNode(
     }
 
     case 'google_sheets': {
-      // Google Sheets node
+      // Google Sheets node - using proper helper function like Supabase version
+      const operation = getStringProperty(config, 'operation', 'read');
       const spreadsheetId = getStringProperty(config, 'spreadsheetId', '');
       const sheetName = getStringProperty(config, 'sheetName', 'Sheet1');
       const range = getStringProperty(config, 'range', '');
-      const operation = getStringProperty(config, 'operation', 'read');
+      const outputFormat = getStringProperty(config, 'outputFormat', 'json') as 'json' | 'keyvalue' | 'text';
+      const readDirection = getStringProperty(config, 'readDirection', 'rows') as 'rows' | 'columns';
       const dataJson = getStringProperty(config, 'data', '[]');
 
       if (!spreadsheetId) {
-        return {
-          ...inputObj,
-          _error: 'Google Sheets node: Spreadsheet ID is required',
-        };
+        throw new Error('Google Sheets node: Spreadsheet ID is required');
       }
 
-      // Build context
+      // Get user ID from workflow context
+      if (!userId) {
+        throw new Error('Google Sheets: User ID not found in workflow context. Please ensure the workflow is executed by an authenticated user.');
+      }
+
+      // Build context for template resolution
       const context = {
         input: inputObj,
         ...nodeOutputs.getAll(),
@@ -1060,127 +1122,190 @@ export async function executeNode(
         json: inputObj,
       };
 
+      // Resolve templates in config values
       const resolvedSpreadsheetId = resolveTemplate(spreadsheetId, context);
-      const resolvedSheetName = resolveTemplate(sheetName, context);
+      const resolvedSheetName = sheetName ? resolveTemplate(sheetName, context) : undefined;
       const resolvedRange = range ? resolveTemplate(range, context) : undefined;
 
       try {
-        // Get access token - try workflow owner first, then current user as fallback
+        // Get access token - try workflow owner first, then fallback user
         // Note: Credentials (GOOGLE_OAUTH_CLIENT_ID/SECRET) are only needed for token refresh
         // If tokens are already stored and valid, credentials are not required
+        console.log(`[Google Sheets] Getting access token for workflow owner user_id: ${userId}, workflow_id: ${workflowId}`);
+        console.log(`[Google Sheets] Fallback user_id available: ${fallbackUserId || 'none'}`);
+        
         const userIdsToTry: string[] = [];
         if (userId) userIdsToTry.push(userId);
-        if (currentUserId && currentUserId !== userId) userIdsToTry.push(currentUserId);
+        if (fallbackUserId && fallbackUserId !== userId) userIdsToTry.push(fallbackUserId);
         
         const accessToken = userIdsToTry.length > 0 
           ? await getGoogleAccessToken(supabase, userIdsToTry) 
           : null;
         
+        if (accessToken && fallbackUserId && fallbackUserId !== userId && userIdsToTry.length > 1) {
+          console.log(`[Google Sheets] ✅ Successfully obtained access token (used fallback: ${userIdsToTry.indexOf(fallbackUserId) > 0})`);
+        } else if (accessToken) {
+          console.log(`[Google Sheets] ✅ Successfully obtained access token`);
+        }
+        
         if (!accessToken) {
           const ownerMessage = userId 
             ? `The workflow owner (user ${userId}) does not have a Google account connected.`
             : 'No workflow owner found.';
-          const currentUserMessage = currentUserId && currentUserId !== userId
-            ? `The current user (user ${currentUserId}) also does not have a Google account connected.`
+          const fallbackMessage = fallbackUserId && fallbackUserId !== userId
+            ? `The fallback user (user ${fallbackUserId}) also does not have a Google account connected.`
             : '';
-          const solutionMessage = userId && currentUserId && currentUserId !== userId
+          const solutionMessage = userId && fallbackUserId && fallbackUserId !== userId
             ? 'Please ensure either: 1) The workflow owner connects their Google account in settings, or 2) You connect your Google account (if you have permission to use it for this workflow).'
             : userId
             ? 'Please ensure the workflow owner has connected their Google account in settings. If you\'re running someone else\'s workflow, you need to either: 1) Have the workflow owner connect their Google account, or 2) Transfer the workflow ownership to your account.'
             : 'Please connect a Google account in settings.';
           
+          const errorMsg = `Google Sheets: OAuth token not found. ${ownerMessage} ${fallbackMessage} ${solutionMessage}`;
+          console.error(`[Google Sheets] ${errorMsg}`);
           return {
             ...inputObj,
-            _error: `Google Sheets: OAuth token not found. ${ownerMessage} ${currentUserMessage} ${solutionMessage}`,
+            _error: errorMsg,
           };
         }
 
-        // Build the API URL
-        let apiUrl = `https://sheets.googleapis.com/v4/spreadsheets/${resolvedSpreadsheetId}/values/`;
-        if (resolvedRange) {
-          apiUrl += `${resolvedSheetName}!${resolvedRange}`;
+      // Prepare data for write operations
+      let writeData: unknown[][] | undefined;
+      if (operation === 'write' || operation === 'append' || operation === 'update') {
+        const dataConfig = config.data;
+        if (dataConfig) {
+          if (typeof dataConfig === 'string') {
+            try {
+              const resolvedData = resolveTemplate(dataConfig, context);
+              writeData = JSON.parse(resolvedData);
+            } catch (parseError) {
+              throw new Error(`Google Sheets: Invalid JSON format for write data. Expected 2D array: [["col1", "col2"], ["val1", "val2"]]. Error: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
+            }
+          } else if (Array.isArray(dataConfig)) {
+            writeData = dataConfig as unknown[][];
+          } else {
+            throw new Error('Google Sheets: Write data must be a 2D array (array of rows). Format: [["col1", "col2"], ["val1", "val2"]]');
+          }
         } else {
-          apiUrl += resolvedSheetName;
+          // Try to extract from input
+          // Support multiple formats: input.values, input.data, input.rows, or direct array
+          const inputData = inputObj.values || inputObj.data || inputObj.rows || input;
+          if (Array.isArray(inputData)) {
+            // Check if it's already a 2D array
+            if (inputData.length > 0 && Array.isArray(inputData[0])) {
+              writeData = inputData as unknown[][];
+            } else {
+              // Convert 1D array to 2D (single row)
+              writeData = [inputData as unknown[]];
+            }
+          } else {
+            // Check if we have empty values array - this is valid for append (skip operation)
+            const hasEmptyValues = inputObj.values && Array.isArray(inputObj.values) && inputObj.values.length === 0;
+            
+            if (hasEmptyValues && operation === 'append') {
+              // For append operation, empty array is valid - just skip the operation
+              console.log('[Google Sheets] Empty values array received for append operation - skipping');
+              return {
+                ...inputObj,
+                data: {
+                  updatedCells: 0,
+                  range: '',
+                },
+                rows: 0,
+                columns: 0,
+                formatted: 'json',
+                operation: 'append',
+                sheetName: resolvedSheetName || 'Sheet1',
+                spreadsheetId: resolvedSpreadsheetId,
+                _skipped: true,
+                _message: 'No data to append - values array is empty',
+              };
+            }
+            
+            throw new Error('Google Sheets: No data provided for write operation. Add data in node config or pass it in input (as input.values, input.data, or input.rows).');
+          }
+        }
+      }
+
+      // Split sheet names if comma-separated
+      const sheetNames = (resolvedSheetName || 'Sheet1').split(',').map(s => s.trim()).filter(s => s);
+      const results: Array<Record<string, unknown>> = [];
+      let consolidatedSuccess = true;
+      let consolidatedError = '';
+
+      // Execute for each sheet
+      console.log(`[Google Sheets] Executing ${operation} operation on spreadsheet: ${resolvedSpreadsheetId}, sheet: ${sheetNames.join(', ')}`);
+      
+      for (const sheet of sheetNames) {
+        // Execute Google Sheets operation using helper function
+        const result = await executeGoogleSheetsOperation({
+          spreadsheetId: resolvedSpreadsheetId,
+          sheetName: sheet,
+          range: resolvedRange,
+          operation: operation as 'read' | 'write' | 'append' | 'update',
+          outputFormat: outputFormat,
+          readDirection: readDirection,
+          data: writeData,
+          accessToken,
+        });
+
+        console.log(`[Google Sheets] Operation result:`, {
+          success: result.success,
+          rows: result.rows,
+          columns: result.columns,
+          hasData: !!result.data,
+          error: result.error
+        });
+
+        if (!result.success) {
+          consolidatedSuccess = false;
+          consolidatedError = result.error || 'Google Sheets operation failed';
         }
 
-        if (operation === 'read') {
-          const response = await fetch(`${apiUrl}?valueRenderOption=UNFORMATTED_VALUE`, {
-            headers: {
-              'Authorization': `Bearer ${accessToken}`,
-            },
-          });
+        results.push({
+          sheetName: sheet,
+          success: result.success,
+          data: result.data,
+          rows: result.rows,
+          columns: result.columns,
+          error: result.error
+        });
+      }
 
-          if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`Google Sheets API error: ${errorText}`);
-          }
+      if (!consolidatedSuccess && sheetNames.length === 1) {
+        throw new Error(consolidatedError);
+      }
 
-          const result = await response.json() as { values?: unknown[][]; range?: string };
-          return {
-            ...inputObj,
-            values: result.values || [],
-            range: result.range,
-          };
-        } else if (operation === 'write' || operation === 'append') {
-          let data: unknown[][];
-          try {
-            const resolvedData = resolveTemplate(dataJson, context);
-            data = JSON.parse(resolvedData);
-          } catch {
-            // Try to extract data from input
-            data = Array.isArray(inputObj.data) ? inputObj.data : [[inputObj]];
-          }
-
-          const method = operation === 'append' ? 'POST' : 'PUT';
-          const url = operation === 'append' ? `${apiUrl}:append?valueInputOption=RAW` : `${apiUrl}?valueInputOption=RAW`;
-
-          const response = await fetch(url, {
-            method,
-            headers: {
-              'Authorization': `Bearer ${accessToken}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              values: data,
-            }),
-          });
-
-          if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`Google Sheets API error: ${errorText}`);
-          }
-
-          const result = await response.json() as {
-            updates?: { updatedRange?: string; updatedRows?: number; updatedColumns?: number };
-            updatedRange?: string;
-            updatedRows?: number;
-            updatedColumns?: number;
-          };
-          return {
-            ...inputObj,
-            updatedRange: result.updates?.updatedRange || result.updatedRange,
-            updatedRows: result.updates?.updatedRows || result.updatedRows,
-            updatedColumns: result.updates?.updatedColumns || result.updatedColumns,
-          };
-        } else {
-          return {
-            ...inputObj,
-            _error: `Google Sheets node: Unsupported operation: ${operation}`,
-          };
-        }
-      } catch (error) {
-        // Only log unexpected errors, not configuration/auth issues
-        const errorMessage = error instanceof Error ? error.message : 'Google Sheets operation failed';
-        const isConfigError = errorMessage.includes('credentials') || errorMessage.includes('authenticate') || errorMessage.includes('OAuth');
-        
-        if (!isConfigError) {
-          console.error('Google Sheets error:', error);
-        }
-        
-        return {
+      // Return formatted result (consolidated if multiple sheets)
+      if (sheetNames.length === 1) {
+        const singleResult = results[0];
+        const output = {
           ...inputObj,
-          _error: `Google Sheets node: ${errorMessage}`,
+          data: singleResult.data,
+          rows: singleResult.rows,
+          columns: singleResult.columns,
+          operation,
+          spreadsheetId: resolvedSpreadsheetId,
+          sheetName: singleResult.sheetName,
+          range: resolvedRange || 'All',
+          formatted: outputFormat,
         };
+        console.log(`[Google Sheets] Returning output with rows: ${singleResult.rows}, columns: ${singleResult.columns}`);
+        return output;
+      } else {
+        // Multiple sheets result
+        const output = {
+          ...inputObj,
+          operation,
+          spreadsheetId: resolvedSpreadsheetId,
+          sheets: results.reduce((acc, res) => ({ ...acc, [res.sheetName as string]: res.data }), {}),
+          results: results, // Detailed results per sheet
+          count: sheetNames.length,
+          success: consolidatedSuccess,
+          range: resolvedRange || 'All',
+        };
+        console.log(`[Google Sheets] Returning multi-sheet output with ${sheetNames.length} sheets`);
+        return output;
       }
     }
 
@@ -1359,7 +1484,7 @@ export async function executeNode(
  */
 export default async function executeWorkflowHandler(req: Request, res: Response) {
   const supabase = getSupabaseClient();
-  const { workflowId, executionId: providedExecutionId, input = {} } = req.body;
+  const { workflowId, executionId: providedExecutionId, input = {}, userId: requestUserId } = req.body;
 
   if (!workflowId) {
     return res.status(400).json({ error: 'workflowId is required' });
@@ -1779,6 +1904,11 @@ export default async function executeWorkflowHandler(req: Request, res: Response
         }
 
         // Execute node
+        // Pass requestUserId as fallback in case workflow owner doesn't have Google connected
+        // but the user executing the workflow does
+        if (node.data.type === 'google_sheets') {
+          console.log(`[execute-workflow] Google Sheets node detected - workflow owner: ${workflow.user_id}, request user: ${requestUserId || 'none'}`);
+        }
         const output = await executeNode(
           node,
           nodeInput,
@@ -1786,7 +1916,7 @@ export default async function executeWorkflowHandler(req: Request, res: Response
           supabase,
           workflowId,
           workflow.user_id,
-          currentUserId
+          requestUserId // Fallback: authenticated user's ID from request (extracted from req.body above)
         );
 
         // CRITICAL: Store output in nodeOutputs for state propagation
