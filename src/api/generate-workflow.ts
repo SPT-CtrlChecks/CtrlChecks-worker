@@ -116,6 +116,176 @@ export default async function generateWorkflow(req: Request, res: Response) {
     // Handle create mode - Step 5-7: Build, Validate, Output
     const streamProgress = req.headers['x-stream-progress'] === 'true';
     
+    // Helper function for surgical merge in edit mode
+    const performSurgicalMerge = (originalWorkflow: any, aiWorkflow: any) => {
+      if (!originalWorkflow || !originalWorkflow.nodes || !Array.isArray(originalWorkflow.nodes)) {
+        return aiWorkflow;
+      }
+
+      console.log('[SURGICAL MERGE] Merging AI response with original workflow to preserve existing nodes');
+      
+      const originalNodes = originalWorkflow.nodes || [];
+      const originalEdges = originalWorkflow.edges || [];
+      const aiNodes = aiWorkflow.nodes || [];
+      const aiEdges = aiWorkflow.edges || [];
+      
+      // Create maps for quick lookup by ID
+      const originalNodeMapById = new Map(originalNodes.map((n: any) => [n.id, n]));
+      const aiNodeMapById = new Map(aiNodes.map((n: any) => [n.id, n]));
+      
+      // Also create maps by type and position for better matching when IDs differ
+      const originalNodeMapByType = new Map<string, any[]>();
+      originalNodes.forEach((n: any) => {
+        const nodeType = n.type || n.data?.type || 'unknown';
+        if (!originalNodeMapByType.has(nodeType)) {
+          originalNodeMapByType.set(nodeType, []);
+        }
+        originalNodeMapByType.get(nodeType)!.push(n);
+      });
+      
+      // Track which original nodes have been matched
+      const matchedOriginalNodeIds = new Set<string>();
+      const mergedNodes: any[] = [];
+      const newNodes: any[] = [];
+      
+      // First pass: Match nodes by ID (exact match)
+      aiNodes.forEach((aiNode: any) => {
+        const originalNode: any = originalNodeMapById.get(aiNode.id);
+        if (originalNode) {
+          // Exact ID match - merge surgically
+          matchedOriginalNodeIds.add(originalNode.id);
+          const mergedNode: any = {
+            ...originalNode,
+            data: {
+              ...(originalNode.data || {}),
+              ...(aiNode.data || {}),
+              config: {
+                ...(originalNode.data?.config || originalNode.config || {}),
+                ...(aiNode.data?.config || aiNode.config || {}),
+              }
+            },
+            position: aiNode.position || originalNode.position,
+          };
+          if (aiNode.config && !aiNode.data?.config) {
+            mergedNode.config = {
+              ...(originalNode.config || {}),
+              ...aiNode.config,
+            };
+          }
+          mergedNodes.push(mergedNode);
+        } else {
+          // No exact ID match - try to match by type and position
+          const nodeType = aiNode.type || aiNode.data?.type || 'unknown';
+          const candidates = originalNodeMapByType.get(nodeType) || [];
+          
+          // Find best match by position proximity (within 100px)
+          let bestMatch: any = null;
+          let minDistance = Infinity;
+          
+          candidates.forEach((candidate: any) => {
+            if (matchedOriginalNodeIds.has(candidate.id)) return; // Already matched
+            
+            const candidatePos = candidate.position || { x: 0, y: 0 };
+            const aiPos = aiNode.position || { x: 0, y: 0 };
+            const distance = Math.sqrt(
+              Math.pow(candidatePos.x - aiPos.x, 2) + 
+              Math.pow(candidatePos.y - aiPos.y, 2)
+            );
+            
+            if (distance < 100 && distance < minDistance) {
+              minDistance = distance;
+              bestMatch = candidate;
+            }
+          });
+          
+          if (bestMatch) {
+            // Found a match by type and position - merge surgically
+            const matchedNode: any = bestMatch;
+            matchedOriginalNodeIds.add(matchedNode.id);
+            const mergedNode: any = {
+              ...matchedNode,
+              data: {
+                ...(matchedNode.data || {}),
+                ...(aiNode.data || {}),
+                config: {
+                  ...(matchedNode.data?.config || matchedNode.config || {}),
+                  ...(aiNode.data?.config || aiNode.config || {}),
+                }
+              },
+              position: aiNode.position || matchedNode.position,
+            };
+            if (aiNode.config && !aiNode.data?.config) {
+              mergedNode.config = {
+                ...(matchedNode.config || {}),
+                ...aiNode.config,
+              };
+            }
+            mergedNodes.push(mergedNode);
+          } else {
+            // No match found - this is a genuinely new node
+            newNodes.push(aiNode);
+          }
+        }
+      });
+      
+      // Add original nodes that weren't matched (preserve them)
+      originalNodes.forEach((originalNode: any) => {
+        if (!matchedOriginalNodeIds.has(originalNode.id)) {
+          mergedNodes.push(originalNode);
+        }
+      });
+      
+      // Combine merged and new nodes
+      const finalNodes = [...mergedNodes, ...newNodes];
+      
+      // Merge edges: preserve original edges, add new ones from AI
+      const originalEdgeMap = new Map(originalEdges.map((e: any) => [`${e.source}-${e.target}`, e]));
+      
+      // Preserve original edges
+      const preservedEdges = originalEdges.filter((e: any) => {
+        const sourceExists = finalNodes.some((n: any) => n.id === e.source);
+        const targetExists = finalNodes.some((n: any) => n.id === e.target);
+        return sourceExists && targetExists;
+      });
+      
+      // Add new edges from AI that don't exist in original
+      const newEdges = aiEdges.filter((e: any) => {
+        const edgeKey = `${e.source}-${e.target}`;
+        return !originalEdgeMap.has(edgeKey);
+      });
+      
+      // Replace edges that were modified in AI response
+      const modifiedEdges = aiEdges.filter((e: any) => {
+        const edgeKey = `${e.source}-${e.target}`;
+        const originalEdge = originalEdgeMap.get(edgeKey);
+        if (originalEdge) {
+          return JSON.stringify(originalEdge) !== JSON.stringify(e);
+        }
+        return false;
+      });
+      
+      // Remove old versions of modified edges and add new ones
+      const finalEdges = [
+        ...preservedEdges.filter((e: any) => {
+          const edgeKey = `${e.source}-${e.target}`;
+          return !modifiedEdges.some((me: any) => `${me.source}-${me.target}` === edgeKey);
+        }),
+        ...modifiedEdges,
+        ...newEdges,
+      ];
+      
+      const matchedCount = matchedOriginalNodeIds.size;
+      const preservedCount = originalNodes.length - matchedCount;
+      console.log(`[SURGICAL MERGE] Matched ${matchedCount} nodes by ID/type, preserved ${preservedCount} unchanged nodes, added ${newNodes.length} new nodes`);
+      console.log(`[SURGICAL MERGE] Preserved ${preservedEdges.length} original edges, added ${newEdges.length} new edges, modified ${modifiedEdges.length} edges`);
+      
+      return {
+        ...aiWorkflow,
+        nodes: finalNodes,
+        edges: finalEdges,
+      };
+    };
+    
     try {
       if (streamProgress) {
         // Enable streaming progress updates
@@ -150,7 +320,12 @@ export default async function generateWorkflow(req: Request, res: Response) {
           const validation = await workflowValidator.validateAndFix(workflow.workflow);
 
           // Use fixed workflow if available
-          const finalWorkflow = validation.fixedWorkflow || workflow.workflow;
+          let finalWorkflow = validation.fixedWorkflow || workflow.workflow;
+          
+          // Apply surgical merge in edit mode
+          if (mode === 'edit' && currentWorkflow) {
+            finalWorkflow = performSurgicalMerge(currentWorkflow, finalWorkflow);
+          }
 
           // Send final result
           res.write(JSON.stringify({
@@ -192,7 +367,12 @@ export default async function generateWorkflow(req: Request, res: Response) {
 
         // Step 6: Validate and auto-fix workflow
         const validation = await workflowValidator.validateAndFix(workflow.workflow);
-        const finalWorkflow = validation.fixedWorkflow || workflow.workflow;
+        let finalWorkflow = validation.fixedWorkflow || workflow.workflow;
+        
+        // Apply surgical merge in edit mode
+        if (mode === 'edit' && currentWorkflow) {
+          finalWorkflow = performSurgicalMerge(currentWorkflow, finalWorkflow);
+        }
 
         return res.json({
           success: true,
